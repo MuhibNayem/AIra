@@ -102,7 +102,11 @@ export const buildCodeAgent = async ({
     const history = ensureHistory(memoryStore, activeSessionId);
     const historyLength = history.length;
     const requestMessages = buildMessageBatch(history, input, systemPrompt);
-    const agentOutput = await app.invoke({ messages: requestMessages });
+    const agentOutput = await app.invoke({ messages: requestMessages }, {
+      recursionLimit: Number.isFinite(Number(process.env.AIRA_RECURSION_LIMIT))
+        ? Number(process.env.AIRA_RECURSION_LIMIT)
+        : 200,
+    });
     const { messages = [] } = agentOutput;
 
     memoryStore.set(activeSessionId, messages);

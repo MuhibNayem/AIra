@@ -45,7 +45,7 @@ const truncate = (value, limit = TOOL_RESULT_PREVIEW_LIMIT) => {
 
 const LINE_CONTEXT_RADIUS = 3;
 
-const buildLineStructure = (content) => {
+export const buildLineStructure = (content) => {
   const lineEnding = content.includes('\r\n') ? '\r\n' : '\n';
   const rawLines = content.split(/\r?\n/);
   const hasTrailingNewline =
@@ -62,7 +62,7 @@ const buildLineStructure = (content) => {
   };
 };
 
-const validateLineRange = (start, end, total) => {
+export const validateLineRange = (start, end, total) => {
   if (!Number.isInteger(start) || start < 1) {
     throw new Error('refactorFileSegment requires startLine to be a positive integer.');
   }
@@ -76,7 +76,7 @@ const validateLineRange = (start, end, total) => {
   }
 };
 
-const sliceContext = (lines, startIndex, endIndex) => {
+export const sliceContext = (lines, startIndex, endIndex) => {
   const beforeStart = Math.max(0, startIndex - LINE_CONTEXT_RADIUS);
   const afterEnd = Math.min(lines.length, endIndex + LINE_CONTEXT_RADIUS);
   return {
@@ -453,7 +453,11 @@ const buildTooling = (refactorChain, systemInfo) => {
   registerTool(
     tool(
       async ({ code, instructions, context }) =>
-        refactorChain.invoke({ code, instructions, context: context ?? '' }),
+        refactorChain.invoke({ code, instructions, context: context ?? '' }, {
+          "recursionLimit": Number.isFinite(Number(process.env.AIRA_RECURSION_LIMIT))
+            ? Number(process.env.AIRA_RECURSION_LIMIT)
+            : 200
+        }),
       {
         name: 'refactorCode',
         description:
@@ -686,9 +690,9 @@ const main = async () => {
   } else {
     ask(); // Start interactive mode directly
   }
-  
+
   // Keep the process alive
-  return new Promise(() => {});
+  return new Promise(() => { });
 };
 
 main().catch((error) => {
