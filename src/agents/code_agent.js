@@ -86,10 +86,12 @@ export const buildCodeAgent = async ({
   sessionId = DEFAULT_SESSION_ID,
   memoryStore = new Map(),
   systemPrompt = GEMINI_CLI_AGENT_PROMPT,
+  recursionLimit = 150,
 }) => {
   const app = createReactAgent({
     llm,
     tools,
+    recursionLimit,
   });
 
   const invoke = async ({ input, sessionId: activeSessionId = sessionId }) => {
@@ -98,6 +100,7 @@ export const buildCodeAgent = async ({
     }
 
     const history = ensureHistory(memoryStore, activeSessionId);
+    const historyLength = history.length;
     const requestMessages = buildMessageBatch(history, input, systemPrompt);
     const agentOutput = await app.invoke({ messages: requestMessages });
     const { messages = [] } = agentOutput;
@@ -106,10 +109,13 @@ export const buildCodeAgent = async ({
 
     const finalMessage = messages.at(-1);
     const output = messageContentToText(finalMessage);
+    const newMessages = messages.slice(historyLength);
 
     return {
       output,
       messages,
+      newMessages,
+      eventMessages: newMessages.slice(0, Math.max(0, newMessages.length - 1)),
       raw: agentOutput,
     };
   };
@@ -119,5 +125,6 @@ export const buildCodeAgent = async ({
     getHistory: (activeSessionId = sessionId) => ensureHistory(memoryStore, activeSessionId),
     sessionId,
     app,
+    recursionLimit,
   };
 };
