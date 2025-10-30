@@ -94,6 +94,7 @@ Environment variables (set via `.env`, shell exports, or CLI):
 | `AIRA_LOG_LEVEL`       | `error`, `warn`, `info`, or `debug` log verbosity      | `info`                    |
 | `AIRA_SESSION_ID`      | Default session id when none is passed via CLI         | `cli-session`             |
 | `AIRA_RECURSION_LIMIT` | Maximum LangGraph recursion depth before aborting run  | `200`                     |
+| `OLLAMA_API_KEY`       | API key for Ollama web search                        | `(none)`                  |
 
 ## Development
 

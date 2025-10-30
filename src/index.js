@@ -16,6 +16,8 @@ import { detectSystemInfo, formatSystemPrompt, getMemoryUsage } from './utils/sy
 import { GEMINI_CLI_AGENT_PROMPT } from './prompts/agent_prompts.js';
 import { resolveProjectPath } from './tools/path_tools.js';
 import { extractUpdatedCode } from './utils/refactor.js';
+import { createWebScraperTool } from './tools/web_scraper.js';
+import { createWebSearchTool } from './tools/web_search.js'; 
 
 const EXIT_COMMANDS = new Set(['exit', 'quit', 'q']);
 const DEFAULT_THOUGHT_TEXT = 'Analyzing request...';
@@ -152,20 +154,17 @@ const stringifyMessageContent = (content) => {
   return '';
 };
 
-const renderToolOutput = (toolName, action, content) => {
+const renderToolOutput = (toolName, content) => {
   const name = toolName ? chalk.bold.yellow(toolName) : chalk.bold.yellow('tool');
   const columns = getTerminalWidth();
   const availableWidth = Math.max(30, columns - 4);
 
   const actionPrefix = `${name} ${chalk.gray('action:')} `;
-  const actionLimit = Math.max(10, availableWidth - stripAnsi(actionPrefix).length);
-  const actionText = action ? toSingleLine(action, actionLimit) : '';
 
   const resultPrefix = `${chalk.gray('result:')} `;
   const resultLimit = Math.max(10, availableWidth - stripAnsi(resultPrefix).length);
   const resultText = toSingleLine(content, resultLimit);
-
-  const actionLine = `${actionPrefix}${actionText ? chalk.cyan(actionText) : chalk.gray('[none]')}`;
+  const actionLine = `${actionPrefix}${chalk.gray(' → has Ran')}`;
   const resultLine = `${resultPrefix}${resultText ? chalk.white(resultText) : chalk.gray('[no output]')}`;
 
   const targetWidth = availableWidth;
@@ -609,8 +608,8 @@ const playAgentTimeline = async (events, renderer) => {
       const entry =
         (event.id && toolActions.get(event.id)) || (event.toolName && toolActions.get(event.toolName));
       const resolvedName = entry?.name || event.toolName || 'tool';
-      const actionSummary = entry?.summary || '';
-      renderToolOutput(resolvedName, actionSummary, event.output);
+
+      renderToolOutput(resolvedName, event.output);
       if (event.id) {
         toolActions.delete(event.id);
       }
@@ -631,11 +630,75 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
   let needsNewline = false;
   let printedChunks = false;
   const streamToolActions = new Map();
-  const storeStreamAction = (keys, name, summary) => {
-    const normalizedSummary = summary ? String(summary) : '';
-    const normalizedName = name || undefined;
-    const entry = { summary: normalizedSummary, name: normalizedName };
-    keys.filter(Boolean).forEach((key) => streamToolActions.set(key, entry));
+  const mergeArgumentText = (existing = '', addition = '') => {
+    if (!addition) {
+      return existing || '';
+    }
+    if (!existing) {
+      return addition;
+    }
+    if (addition.startsWith(existing)) {
+      return addition;
+    }
+    if (existing.endsWith(addition)) {
+      return existing;
+    }
+    return `${existing}${addition}`;
+  };
+  const computeEntrySummary = (entry) => {
+    const source =
+      entry.args !== undefined && entry.args !== null && entry.args !== ''
+        ? entry.args
+        : entry.argText;
+    if (source === undefined || source === null) {
+      return entry.summary || '';
+    }
+    if (typeof source === 'string' && !source.trim()) {
+      return entry.summary || '';
+    }
+    try {
+      return summarizeActionArgs(source);
+    } catch (_) {
+      return entry.summary || '';
+    }
+  };
+  const upsertStreamAction = ({ keys, name, summary, args, argText }) => {
+    const normalizedKeys = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
+    if (!normalizedKeys.length) {
+      return;
+    }
+    let entry =
+      normalizedKeys.reduce((found, key) => found || streamToolActions.get(key), null) || {
+        name: undefined,
+        args: undefined,
+        argText: '',
+        summary: '',
+        keys: new Set(),
+      };
+    if (name && name !== entry.name) {
+      entry.name = name;
+    }
+    if (typeof args !== 'undefined') {
+      entry.args = args;
+    }
+    if (typeof argText === 'string' && argText) {
+      entry.argText = mergeArgumentText(entry.argText, argText);
+      if (!entry.args) {
+        try {
+          entry.args = JSON.parse(entry.argText);
+        } catch (_) {
+          // Ignore until we have a complete JSON payload.
+        }
+      }
+    }
+    if (typeof summary === 'string' && summary.trim()) {
+      entry.summary = summary.trim();
+    }
+    entry.summary = computeEntrySummary(entry);
+    normalizedKeys.forEach((key) => {
+      entry.keys.add(key);
+      streamToolActions.set(key, entry);
+    });
   };
   const getStreamAction = (...keys) => {
     for (const key of keys) {
@@ -644,13 +707,22 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
       }
       const entry = streamToolActions.get(key);
       if (entry) {
-        return entry;
+        return { name: entry.name, summary: entry.summary };
       }
     }
     return null;
   };
   const deleteStreamAction = (...keys) => {
-    keys.filter(Boolean).forEach((key) => streamToolActions.delete(key));
+    const processed = new Set();
+    keys.filter(Boolean).forEach((key) => {
+      const entry = streamToolActions.get(key);
+      if (entry && !processed.has(entry)) {
+        entry.keys?.forEach((linkedKey) => streamToolActions.delete(linkedKey));
+        processed.add(entry);
+      } else {
+        streamToolActions.delete(key);
+      }
+    });
   };
   let response;
 
@@ -662,12 +734,87 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
   };
 
   const handleStreamEvent = async ({ mode, payload }) => {
+    const registerStreamToolCalls = (...sources) => {
+      sources
+        .filter(Boolean)
+        .forEach((source) => {
+          const explicitCalls = extractToolCalls(source) ?? [];
+          const directCalls = Array.isArray(source?.tool_calls) ? source.tool_calls : [];
+          const deltaCalls = Array.isArray(source?.delta?.tool_calls) ? source.delta.tool_calls : [];
+          const toolCalls = [...explicitCalls, ...directCalls, ...deltaCalls];
+          if (!toolCalls?.length) {
+            return;
+          }
+          toolCalls.forEach((call) => {
+            const deltaPayload = call?.delta || {};
+            const functionPayload = call?.function || deltaPayload?.function || {};
+            const toolCallId =
+              call?.id ||
+              call?.tool_call_id ||
+              deltaPayload?.id ||
+              call?.name ||
+              call?.tool;
+            const toolName = call?.name || call?.tool || functionPayload?.name;
+            const argsCandidate =
+              call?.args ??
+              call?.input ??
+              call?.tool_input ??
+              call?.kwargs ??
+              call?.function?.input ??
+              functionPayload?.input ??
+              call?.arguments ??
+              deltaPayload?.arguments;
+            const argumentText =
+              typeof argsCandidate === 'string'
+                ? argsCandidate
+                : typeof call?.function?.arguments === 'string'
+                  ? call.function.arguments
+                  : typeof functionPayload?.arguments === 'string'
+                    ? functionPayload.arguments
+                    : typeof call?.arguments === 'string'
+                      ? call.arguments
+                      : typeof deltaPayload?.function?.arguments === 'string'
+                        ? deltaPayload.function.arguments
+                        : typeof deltaPayload?.arguments === 'string'
+                          ? deltaPayload.arguments
+                          : undefined;
+            const normalizedArgs =
+              typeof argsCandidate === 'string'
+                ? undefined
+                : argsCandidate !== undefined
+                  ? argsCandidate
+                  : typeof call?.arguments === 'object'
+                    ? call.arguments
+                    : typeof deltaPayload?.arguments === 'object'
+                      ? deltaPayload.arguments
+                      : undefined;
+            const keys = [toolCallId, toolName].filter(Boolean);
+            if (!keys.length) {
+              return;
+            }
+            upsertStreamAction({
+              keys,
+              name: toolName,
+              args: normalizedArgs,
+              argText: argumentText,
+            });
+          });
+        });
+    };
+
     if (mode === 'messages') {
       const [message, metadata] = payload || [];
       if (!message) {
         return;
       }
       const messageType = messageTypeOfChunk(message);
+      registerStreamToolCalls(
+        message,
+        metadata,
+        metadata?.delta,
+        metadata?.tool_call_delta,
+        metadata?.tool_call,
+      );
       const text = stringifyMessageContent(message.content);
       if (!text) {
         return;
@@ -690,10 +837,26 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
         flushStreamLine();
         const toolCallId = metadata?.tool_call_id || metadata?.task_id || message?.tool_call_id;
         const toolName = message?.name || metadata?.tool || metadata?.name || 'tool';
+        const metadataArgs =
+          metadata?.tool_input ??
+          metadata?.input ??
+          metadata?.result ??
+          metadata?.args;
+        const metadataArgText =
+          typeof metadataArgs === 'string'
+            ? metadataArgs
+            : typeof metadata?.arguments === 'string'
+              ? metadata?.arguments
+              : undefined;
+        upsertStreamAction({
+          keys: [toolCallId, toolName],
+          name: toolName,
+          args: typeof metadataArgs === 'string' ? undefined : metadataArgs,
+          argText: metadataArgText,
+        });
         const entry = getStreamAction(toolCallId, toolName);
         const resolvedName = entry?.name || toolName;
-        const actionSummary = entry?.summary || '';
-        renderToolOutput(resolvedName, actionSummary, text);
+        renderToolOutput(resolvedName, text);
         deleteStreamAction(toolCallId, toolName, entry?.name);
       }
     }
@@ -708,7 +871,12 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
           const toolInput = task.input?.tool_input ?? task.input;
           const actionSummary = summarizeActionArgs(toolInput);
           const toolCallId = task.tool_call_id || task.id;
-          storeStreamAction([toolCallId, toolNameHint, task.name], toolNameHint, actionSummary);
+          upsertStreamAction({
+            keys: [toolCallId, toolNameHint, task.name],
+            name: toolNameHint,
+            args: toolInput,
+            summary: actionSummary,
+          });
           renderer.persistStep(
             `${chalk.bold(toolNameHint || task.name || 'Task')} ${chalk.gray('started')}`,
           );
@@ -1020,6 +1188,8 @@ const buildTooling = (refactorChain, systemInfo) => {
     ),
     'null',
   );
+  registerTool(createWebScraperTool(), 'url: string');
+  registerTool(createWebSearchTool(), 'query: string');
 
   return { tools, catalog };
 };
