@@ -125,14 +125,24 @@ const resolveCommandInput = (raw) => {
  * @returns {Promise<string>} The stdout and stderr of the command.
  */
 export const runShellCommand = async (command, options = {}, systemInfo = detectSystemInfo()) => {
-  if (!command || typeof command !== 'string') {
-    throw new Error('runShellCommand expects a string command.');
+  // Validate command input using the centralized validation function
+  const validatedCommand = resolveCommandInput(command);
+  
+  // Validate that resolveCommandInput returned a valid command
+  if (!validatedCommand || typeof validatedCommand !== 'string') {
+    throw new Error(`Invalid command: resolveCommandInput failed to return a valid command for input: ${command}`);
   }
 
-  const normalized = normalizeCommand(command, systemInfo);
+  // Validate options
+  if (typeof options !== 'object') {
+    throw new Error(`Options must be an object if provided. Received: ${typeof options}`);
+  }
+
+  const normalized = normalizeCommand(validatedCommand, systemInfo);
 
   const defaultOptions = {
     maxBuffer: DEFAULT_MAX_BUFFER,
+    timeout: 30000, 
     ...options,
   };
 
@@ -153,13 +163,16 @@ export const runShellCommand = async (command, options = {}, systemInfo = detect
   } catch (error) {
     const stderrClean = error.stderr?.trim();
     const stdoutClean = error.stdout?.trim();
-    return [
+    const errorMessage = [
       `Command failed: ${error.message}`,
+      `Command: ${validatedCommand}`,
       stdoutClean ? `stdout:\n${stdoutClean}` : undefined,
       stderrClean ? `stderr:\n${stderrClean}` : undefined,
     ]
       .filter(Boolean)
       .join('\n\n');
+    
+    throw new Error(errorMessage);
   }
 };
 
@@ -170,7 +183,7 @@ export const runShellCommand = async (command, options = {}, systemInfo = detect
  */
 export const createShellTool = (systemInfo = detectSystemInfo()) => {
   const execOptions = systemInfo.isWindows
-    ? { shell: process.env.COMSPEC || 'C:\\\\Windows\\\\System32\\\\cmd.exe' }
+    ? { shell: process.env.COMSPEC || 'C:\\Windows\\System32\\cmd.exe' }
     : { shell: process.env.SHELL || '/bin/bash' };
 
   return async (rawInput) => {

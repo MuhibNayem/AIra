@@ -1,4 +1,5 @@
 import os from 'os';
+import v8 from 'v8';
 
 const WINDOWS_PLATFORM = 'win32';
 
@@ -45,4 +46,18 @@ export const formatSystemPrompt = (info) => {
   }
 
   return parts.join(' | ');
+};
+
+export const getMemoryUsage = () => {
+  const { heap_size_limit: heapSizeLimit } = v8.getHeapStatistics();
+  const { heapUsed, heapTotal, rss } = process.memoryUsage();
+  const remaining = Math.max(0, heapSizeLimit - heapUsed);
+
+  return {
+    heapUsed,
+    heapTotal,
+    heapSizeLimit,
+    remaining,
+    rss,
+  };
 };

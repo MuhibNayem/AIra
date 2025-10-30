@@ -2,6 +2,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { glob } from 'glob';
 import { detectSystemInfo } from '../utils/system.js';
+import { IGNORED_GLOB_PATTERNS, filterIgnoredEntries, isPathIgnored } from '../utils/ignore.js';
 
 const ENCODING = 'utf-8';
 
@@ -53,7 +54,7 @@ export const attemptResolveExistingPath = async (originalPath, { type = 'file' }
   const direct = resolvePathForOS(normalizedOriginal, systemInfo);
   const existsDirect =
     type === 'file' ? await fileExists(direct) : await directoryExists(direct);
-  if (existsDirect) {
+  if (existsDirect && !isPathIgnored(direct)) {
     return direct;
   }
 
@@ -68,13 +69,17 @@ export const attemptResolveExistingPath = async (originalPath, { type = 'file' }
     absolute: true,
     nocase: systemInfo.isWindows,
     dot: true,
+    ignore: IGNORED_GLOB_PATTERNS,
   });
 
   const viable = [];
   for (const match of matches) {
     try {
       const stats = await fs.stat(match);
-      if ((type === 'file' && stats.isFile()) || (type === 'directory' && stats.isDirectory())) {
+      if (
+        !isPathIgnored(match) &&
+        ((type === 'file' && stats.isFile()) || (type === 'directory' && stats.isDirectory()))
+      ) {
         viable.push(match);
       }
     } catch (_) {
@@ -100,6 +105,9 @@ export const readFile = async (filePath) => {
   try {
     const systemInfo = detectSystemInfo();
     resolvedPath = resolvePathForOS(filePath, systemInfo);
+    if (isPathIgnored(resolvedPath)) {
+      return `Access to ${resolvedPath} is blocked because it resides in an ignored directory.`;
+    }
     const stats = await fs.stat(resolvedPath);
     if (!stats.isFile()) {
       return `Error reading file: ${resolvedPath} is not a regular file.`;
@@ -137,6 +145,9 @@ export const writeFile = async (filePath, content) => {
   try {
     const systemInfo = detectSystemInfo();
     resolvedPath = resolvePathForOS(filePath, systemInfo);
+    if (isPathIgnored(resolvedPath)) {
+      return 'Error writing to file: target path is inside an ignored directory.';
+    }
     await ensureParentDirectory(resolvedPath);
 
     const exists = await fileExists(resolvedPath);
@@ -162,7 +173,7 @@ export const writeFile = async (filePath, content) => {
 export const resolveFilePath = async (filePath) => {
   const systemInfo = detectSystemInfo();
   const direct = resolvePathForOS(filePath, systemInfo);
-  if (await fileExists(direct)) {
+  if (!isPathIgnored(direct) && (await fileExists(direct))) {
     return direct;
   }
 
@@ -194,8 +205,11 @@ export const listDirectory = async (directoryPath) => {
         directoryToRead = fallback;
       }
     }
+    if (isPathIgnored(directoryToRead)) {
+      return 'Access to this directory is blocked because it resides in an ignored path.';
+    }
     const entries = await fs.readdir(directoryToRead);
-    return entries;
+    return filterIgnoredEntries(entries);
   } catch (error) {
     return `Error listing directory: ${error.message}`;
   }

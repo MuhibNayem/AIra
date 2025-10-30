@@ -6,4 +6,5 @@ export const ollama = new ChatOllama({
   // format: 'json',
   temperature: 0.2,
   streaming: true,
+  keepAlive: 480,
 });

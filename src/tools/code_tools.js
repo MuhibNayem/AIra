@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import { glob } from 'glob';
 import { join, resolve } from 'path';
+import { IGNORED_GLOB_PATTERNS, isPathIgnored } from '../utils/ignore.js';
 
 /**
  * Searches for a pattern in the content of files.
@@ -11,7 +12,11 @@ import { join, resolve } from 'path';
 export const searchFileContent = async (pattern, path = './', flags = '') => {
   try {
     const searchRoot = resolve(path);
-    const files = await glob('**/*', { cwd: searchRoot, nodir: true, ignore: 'node_modules/**' });
+    const files = await glob('**/*', {
+      cwd: searchRoot,
+      nodir: true,
+      ignore: IGNORED_GLOB_PATTERNS,
+    });
     const results = [];
     let regex;
 
@@ -23,6 +28,9 @@ export const searchFileContent = async (pattern, path = './', flags = '') => {
 
     for (const file of files) {
       const filePath = join(searchRoot, file);
+      if (isPathIgnored(filePath)) {
+        continue;
+      }
       try {
         const content = await fs.readFile(filePath, 'utf-8');
         const lines = content.split('\n');

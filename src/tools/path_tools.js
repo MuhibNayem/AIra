@@ -1,6 +1,7 @@
 import path from 'path';
 import { glob, hasMagic } from 'glob';
 import { detectSystemInfo } from '../utils/system.js';
+import { IGNORED_GLOB_PATTERNS, isPathIgnored } from '../utils/ignore.js';
 
 const DEFAULT_LIMIT = 20;
 
@@ -49,9 +50,11 @@ export const resolveProjectPath = async (params = {}) => {
     absolute: true,
     nocase: systemInfo.isWindows,
     dot: true,
+    ignore: IGNORED_GLOB_PATTERNS,
   });
 
-  const unique = Array.from(new Set(rankMatches(matches)));
+  const filtered = matches.filter((match) => !isPathIgnored(match));
+  const unique = Array.from(new Set(rankMatches(filtered)));
   const limited = unique.slice(0, limit);
 
   return JSON.stringify(
