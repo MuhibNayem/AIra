@@ -1,15 +1,34 @@
 {
-  "name": "aira",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "aira-cli-agent",
+  "version": "0.1.0",
+  "description": "Local-first LangChain + Ollama developer assistant for the terminal.",
+  "main": "src/index.js",
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "ai",
+    "cli",
+    "langchain",
+    "ollama",
+    "developer-tools"
+  ],
+  "author": "A. K. M Muhibullah Nayem",
+  "license": "Apache-2.0",
+  "bin": {
+    "aira": "bin/aira.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@langchain/core": "^1.0.2",
     "@langchain/langgraph": "^1.0.1",
