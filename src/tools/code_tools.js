@@ -40,7 +40,7 @@ export const searchFileContent = async (pattern, path = './', flags = '') => {
           }
         }
       } catch (readError) {
-        // Ignore files that can't be read (e.g., binary files)
+        
       }
     }
     return results.length ? results.join('\n') : 'No matches found.';

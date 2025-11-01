@@ -83,7 +83,7 @@ export const attemptResolveExistingPath = async (originalPath, { type = 'file' }
         viable.push(match);
       }
     } catch (_) {
-      // ignore stale match
+      
     }
   }
 

@@ -3,7 +3,7 @@ import util from 'util';
 import { detectSystemInfo } from '../utils/system.js';
 
 const execPromise = util.promisify(exec);
-const DEFAULT_MAX_BUFFER = 1024 * 1024 * 10; // 10 MB
+const DEFAULT_MAX_BUFFER = 1024 * 1024 * 10; 
 const WINDOWS_ALIAS_MAP = {
   ls: ({ args }) => {
     const switches = [];
@@ -125,15 +125,15 @@ const resolveCommandInput = (raw) => {
  * @returns {Promise<string>} The stdout and stderr of the command.
  */
 export const runShellCommand = async (command, options = {}, systemInfo = detectSystemInfo()) => {
-  // Validate command input using the centralized validation function
+  
   const validatedCommand = resolveCommandInput(command);
   
-  // Validate that resolveCommandInput returned a valid command
+  
   if (!validatedCommand || typeof validatedCommand !== 'string') {
     throw new Error(`Invalid command: resolveCommandInput failed to return a valid command for input: ${command}`);
   }
 
-  // Validate options
+  
   if (typeof options !== 'object') {
     throw new Error(`Options must be an object if provided. Received: ${typeof options}`);
   }

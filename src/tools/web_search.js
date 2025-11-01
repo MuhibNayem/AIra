@@ -13,6 +13,7 @@ export const createWebSearchTool = () => {
       try {
         const res = await ollama.webSearch({
           query: input,
+          maxResults: 10,
         });
         return JSON.stringify(res.results);
       } catch (error) {

@@ -28,7 +28,7 @@ const baseLogger = (scope) => {
     if (!shouldLog(configuredLevel, level)) {
       return;
     }
-    // eslint-disable-next-line no-console
+    
     console[level === 'debug' ? 'log' : level](formatMessage(scope, level, message, meta));
   };
 

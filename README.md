@@ -53,6 +53,8 @@ npx aira
 ```
 
 AIra keeps the conversation open. Type `exit`, `quit`, or `q` to end the session. Memory persists for the lifetime of the process (configurable via `--session` or `AIRA_SESSION_ID`).
+Before the first prompt appears, AIra verifies that required environment variables (`OLLAMA_BASE_URL`, `OLLAMA_MODEL`) are set and that the Ollama daemon is reachable; if anything is missing it prints remediation steps instead of starting.
+At startup AIra now performs a quick prerequisite check (Ollama binary + default model). If something is missing it prints remediation guidance before the chat loop begins. Skip the guard with `aira --no-check` or by exporting `AIRA_NO_STARTUP_CHECK=1`.
 
 ### Single-shot queries
 
@@ -108,6 +110,13 @@ Environment variables (set via `.env`, shell exports, or CLI):
 - `npm test` (placeholder script – customise for your project).
 - `node src/index.js --ask "self-check"` – quick smoke test of the agent.
 - Add targeted unit tests in `tests/` when introducing new functionality.
+
+### Diagnostics
+
+- `aira --check` – run a read-only dependency audit anywhere (detects Ollama, confirms the default model, writes a report to `reports/onboarding-report.txt`).
+- `aira --check --fix` – attempt automatic remediation (pull the default model, execute `aira --ask "self-check"`); add `--skip-pull`, `--skip-self-check`, or `--no-report` to tailor the behaviour.
+- Append `--no-check` (or set `AIRA_NO_STARTUP_CHECK=1`) to bypass the automatic preflight when launching the interactive CLI once you already manage the required environment variables yourself.
+- Use `--report <path>` to direct the diagnostic log to a custom location for sharing with your team.
 
 ## License
 

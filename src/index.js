@@ -18,6 +18,7 @@ import { resolveProjectPath } from './tools/path_tools.js';
 import { extractUpdatedCode } from './utils/refactor.js';
 import { createWebScraperTool } from './tools/web_scraper.js';
 import { createWebSearchTool } from './tools/web_search.js'; 
+import { runDiagnostics } from './diagnostics/onboarding.js';
 
 const EXIT_COMMANDS = new Set(['exit', 'quit', 'q']);
 const DEFAULT_THOUGHT_TEXT = 'Analyzing request...';
@@ -26,7 +27,7 @@ const TOOL_ACTION_PREVIEW_LIMIT = 30;
 let cursorHookRegistered = false;
 
 const STRIP_ANSI_PATTERN = new RegExp(
-  // eslint-disable-next-line no-control-regex
+  
   '[\\u001B\\u009B][[\\]()#;?]*(?:' +
     '(?:(?:[0-9]{1,4})(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]' +
     '|(?:[\\dA-PR-TZcf-nq-uy=><~]))',
@@ -687,7 +688,7 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
         try {
           entry.args = JSON.parse(entry.argText);
         } catch (_) {
-          // Ignore until we have a complete JSON payload.
+          
         }
       }
     }
@@ -1199,21 +1200,74 @@ const parseCliArgs = () => {
   const options = {
     mode: 'interactive',
     sessionId: process.env.AIRA_SESSION_ID || 'cli-session',
+    skipStartupCheck: false,
+    diagnostics: {
+      enabled: false,
+      autoFix: false,
+      skipPull: false,
+      skipSelfCheck: false,
+      reportPath: undefined,
+    },
   };
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === '--check' || arg === '--doctor') {
+      options.mode = 'diagnostics';
+      options.diagnostics.enabled = true;
+      continue;
+    }
+    if (arg === '--fix') {
+      options.diagnostics.autoFix = true;
+      continue;
+    }
+    if (arg === '--skip-check' || arg === '--no-check' || arg === '--skip-startup-check') {
+      options.skipStartupCheck = true;
+      continue;
+    }
+    if (arg === '--skip-pull') {
+      options.diagnostics.skipPull = true;
+      continue;
+    }
+    if (arg === '--skip-self-check') {
+      options.diagnostics.skipSelfCheck = true;
+      continue;
+    }
+    if ((arg === '--report' || arg === '--report-path') && args[index + 1]) {
+      options.diagnostics.reportPath = args[index + 1];
+      index += 1;
+      continue;
+    }
+    if (arg === '--no-report') {
+      options.diagnostics.reportPath = null;
+      continue;
+    }
     if (arg === '--session' && args[index + 1]) {
       options.sessionId = args[index + 1];
       index += 1;
-    } else if (arg === '--ask' && args[index + 1]) {
+      continue;
+    }
+    if (arg === '--ask' && args[index + 1]) {
       options.mode = 'single';
       options.initialInput = args[index + 1];
       index += 1;
-    } else if (!arg.startsWith('--') && !options.initialInput) {
+      continue;
+    }
+    if (!arg.startsWith('--') && !options.initialInput) {
       options.mode = 'single';
       options.initialInput = arg;
     }
+  }
+
+  if (options.diagnostics.enabled) {
+    options.mode = 'diagnostics';
+  }
+
+  if (
+    process.env.AIRA_NO_STARTUP_CHECK === '1' ||
+    process.env.AIRA_SKIP_STARTUP_CHECK === '1'
+  ) {
+    options.skipStartupCheck = true;
   }
 
   return options;
@@ -1221,6 +1275,43 @@ const parseCliArgs = () => {
 
 const main = async () => {
   const cliOptions = parseCliArgs();
+
+  if (cliOptions.mode === 'diagnostics') {
+    const { diagnostics } = cliOptions;
+    const result = await runDiagnostics({
+      autoFix: diagnostics.autoFix,
+      skipPull: diagnostics.skipPull,
+      skipSelfCheck: diagnostics.skipSelfCheck,
+      reportPath: diagnostics.reportPath,
+    });
+    if (!result.success) {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (!cliOptions.skipStartupCheck) {
+    const prerequisites = await runDiagnostics({
+      autoFix: false,
+      skipSelfCheck: true,
+      reportPath: null,
+      silent: true,
+    });
+    if (!prerequisites.success) {
+      console.log(chalk.red('AIra prerequisites are missing or incomplete:'));
+      prerequisites.friction.forEach(({ message }, index) => {
+        console.log(chalk.yellow(`  ${index + 1}. ${message}`));
+      });
+      console.log(
+        chalk.gray(
+          '\nRun "aira --check" to review details or "aira --check --fix" to attempt automatic remediation.',
+        ),
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   const systemInfo = detectSystemInfo();
   const systemPrompt = `${GEMINI_CLI_AGENT_PROMPT.trim()}\n\nEnvironment Context:\n${formatSystemPrompt(
     systemInfo,
@@ -1302,7 +1393,7 @@ const main = async () => {
     });
   };
 
-  // Handle both single-shot and interactive modes using the same ask() function
+  
   console.log('AIra is ready. Type your request, or "exit" to quit.');
   if (cliOptions.mode === 'single' && cliOptions.initialInput) {
     try {
@@ -1311,7 +1402,7 @@ const main = async () => {
         input: cliOptions.initialInput,
         sessionId: cliOptions.sessionId,
       });
-      ask(); // Continue with interactive mode after handling initial input
+      ask(); 
     } catch (error) {
       logger.error('Single-shot execution failed.', { error: error.message });
       rl.close();
