@@ -95,8 +95,13 @@ Environment variables (set via `.env`, shell exports, or CLI):
 | `OLLAMA_MODEL`         | Chat model name to load from Ollama                    | `qwen3:latest`            |
 | `AIRA_LOG_LEVEL`       | `error`, `warn`, `info`, or `debug` log verbosity      | `info`                    |
 | `AIRA_SESSION_ID`      | Default session id when none is passed via CLI         | `cli-session`             |
-| `AIRA_RECURSION_LIMIT` | Maximum LangGraph recursion depth before aborting run  | `200`                     |
-| `OLLAMA_API_KEY`       | API key for Ollama web search                        | `(none)`                  |
+| `AIRA_RECURSION_LIMIT` | Maximum LangGraph recursion depth before aborting run  | `300`                     |
+| `OLLAMA_API_KEY`       | API key used when enabling Ollama's web search tooling | `(none)`                  |
+| `GOOGLE_API_KEY`       | Google Custom Search API key for web lookups           | `(none)`                  |
+| `GOOGLE_CSE_ID`        | Google Custom Search Engine ID                         | `(none)`                  |
+| `SERPER_API_KEY`       | Serper developer key for search provider fallback      | `(none)`                  |
+
+The `.env.example` file contains the minimal defaults needed to get started. Copy it to `.env` for local development and then supply any optional search-related variables (`OLLAMA_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CSE_ID`, `SERPER_API_KEY`) as required by your workflow. Keep actual credentials out of version control—use personal `.env` files or a secrets manager instead.
 
 ## Development
 
