@@ -1,0 +1,75 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { promises as fs } from 'fs';
+import os from 'os';
+import path from 'path';
+import { resolveProjectPath } from '../src/tools/path_tools.js';
+
+const createTempDir = async () => {
+  const prefix = path.join(os.tmpdir(), 'aira-path-tools-');
+  return fs.mkdtemp(prefix);
+};
+
+describe('path_tools.resolveProjectPath', () => {
+  let tempDir;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir();
+    await fs.mkdir(path.join(tempDir, 'src'), { recursive: true });
+    await fs.writeFile(path.join(tempDir, 'src', 'index.js'), '', 'utf-8');
+    await fs.writeFile(path.join(tempDir, 'README.md'), '', 'utf-8');
+  });
+
+  afterEach(async () => {
+    if (tempDir) {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns matches for provided query', async () => {
+    const json = await resolveProjectPath({
+      query: 'index.js',
+      cwd: tempDir,
+    });
+    const result = JSON.parse(json);
+    expect(result.matches.some((match) => match.endsWith('src/index.js'))).toBe(true);
+    expect(result.count).toBeGreaterThanOrEqual(1);
+  });
+
+  it('provides fallback listing when no matches found', async () => {
+    const json = await resolveProjectPath({
+      query: 'missing.file',
+      cwd: tempDir,
+    });
+    const result = JSON.parse(json);
+    expect(result.matches.length).toBe(0);
+    expect(result.fallback).toBeTruthy();
+    expect(result.fallback.entries.length).toBeGreaterThan(0);
+  });
+
+  it('splits multiple queries by OR', async () => {
+    await fs.writeFile(path.join(tempDir, 'another.txt'), '', 'utf-8');
+    const json = await resolveProjectPath({
+      query: 'missing OR README.md',
+      cwd: tempDir,
+      limit: 1,
+    });
+    const result = JSON.parse(json);
+    expect(result.queries.length).toBe(2);
+    expect(result.matches.length).toBe(1);
+  });
+
+  it('reports fallback error when directory listing fails', async () => {
+    const readdirSpy = vi.spyOn(fs, 'readdir').mockRejectedValue(new Error('nope'));
+    const json = await resolveProjectPath({
+      query: 'missing.file',
+      cwd: tempDir,
+    });
+    readdirSpy.mockRestore();
+    const result = JSON.parse(json);
+    expect(result.fallback.error).toMatch(/nope/);
+  });
+
+  it('throws on empty query string', async () => {
+    await expect(resolveProjectPath({ query: '   ' })).rejects.toThrow(/non-empty/);
+  });
+});

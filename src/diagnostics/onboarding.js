@@ -5,6 +5,7 @@ import path from 'path';
 import { promisify } from 'util';
 import chalk from 'chalk';
 import { detectSystemInfo } from '../utils/system.js';
+import { telemetry } from '../utils/telemetry.js';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MODEL = process.env.OLLAMA_MODEL || 'qwen3:latest';
@@ -258,50 +259,70 @@ export const runDiagnostics = async ({
   skipSelfCheck = false,
   reportPath = defaultReportPath(),
   silent = false,
+  context = 'onboarding',
 } = {}) => {
+  const startedAt = process.hrtime.bigint();
   const collector = [];
   const friction = [];
-
-  const systemInfo = detectSystemInfo();
-  emitLine(collector, silent, chalk.bold(`AIra Diagnostics (autoFix=${autoFix ? 'yes' : 'no'})`));
-  emitLine(
-    collector,
-    silent,
-    chalk.gray(`Environment: ${systemInfo.prettyName} | Shell: ${systemInfo.shell}`),
-  );
-
-  checkEnvironment(collector, friction, silent);
-  const ollamaReady = await checkOllamaAvailability(collector, friction, silent);
-  if (ollamaReady) {
-    await ensureModelPresent(collector, friction, silent, { autoFix, skipPull });
-  }
-  await runSelfCheck(collector, friction, silent, { autoFix, skipSelfCheck });
-
-  emitLine(collector, silent, chalk.bold('\nSummary'));
-  if (friction.length) {
-    friction.forEach(({ message }, index) => {
-      emitLine(collector, silent, chalk.yellow(`  ${index + 1}. ${message}`));
-    });
-  } else {
-    emitLine(collector, silent, chalk.green('  No friction detected.'));
-  }
+  let runErrorMessage;
+  let success = false;
 
   try {
-    await writeReport({ reportPath, lines: collector, friction });
-  } catch (error) {
+    const systemInfo = detectSystemInfo();
+    emitLine(collector, silent, chalk.bold(`AIra Diagnostics (autoFix=${autoFix ? 'yes' : 'no'})`));
     emitLine(
       collector,
       silent,
-      chalk.red(`Failed to write diagnostic report: ${error.message}`),
+      chalk.gray(`Environment: ${systemInfo.prettyName} | Shell: ${systemInfo.shell}`),
     );
-  }
 
-  return {
-    friction,
-    success: friction.length === 0,
-    reportPath,
-    lines: collector,
-  };
+    checkEnvironment(collector, friction, silent);
+    const ollamaReady = await checkOllamaAvailability(collector, friction, silent);
+    if (ollamaReady) {
+      await ensureModelPresent(collector, friction, silent, { autoFix, skipPull });
+    }
+    await runSelfCheck(collector, friction, silent, { autoFix, skipSelfCheck });
+
+    emitLine(collector, silent, chalk.bold('\nSummary'));
+    if (friction.length) {
+      friction.forEach(({ message }, index) => {
+        emitLine(collector, silent, chalk.yellow(`  ${index + 1}. ${message}`));
+      });
+    } else {
+      emitLine(collector, silent, chalk.green('  No friction detected.'));
+    }
+
+    try {
+      await writeReport({ reportPath, lines: collector, friction });
+    } catch (error) {
+      emitLine(
+        collector,
+        silent,
+        chalk.red(`Failed to write diagnostic report: ${error.message}`),
+      );
+    }
+
+    success = friction.length === 0;
+
+    return {
+      friction,
+      success,
+      reportPath,
+      lines: collector,
+    };
+  } catch (error) {
+    runErrorMessage = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    const durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+    telemetry.recordDiagnosticsRun({
+      success,
+      frictionCount: friction.length,
+      durationMs: Number.isFinite(durationMs) ? durationMs : 0,
+      context,
+      error: runErrorMessage,
+    });
+  }
 };
 const checkEnvironment = (collector, friction, silent) => {
   logSection(collector, silent, 'Checking environment variables');

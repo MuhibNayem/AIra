@@ -19,6 +19,8 @@ import { extractUpdatedCode } from './utils/refactor.js';
 import { createWebScraperTool } from './tools/web_scraper.js';
 import { createWebSearchTool } from './tools/web_search.js'; 
 import { runDiagnostics } from './diagnostics/onboarding.js';
+import { runHealthCheck } from './diagnostics/health_check.js';
+import { telemetry } from './utils/telemetry.js';
 
 const EXIT_COMMANDS = new Set(['exit', 'quit', 'q']);
 const DEFAULT_THOUGHT_TEXT = 'Analyzing request...';
@@ -579,7 +581,7 @@ const createThoughtRenderer = () => {
   };
 };
 
-const playAgentTimeline = async (events, renderer) => {
+const playAgentTimeline = async (events, renderer, { onToolCall, onToolResult } = {}) => {
   if (!events.length) {
     await renderer.flash('Formulating plan…');
     return;
@@ -604,6 +606,13 @@ const playAgentTimeline = async (events, renderer) => {
       renderer.persistStep(
         `${chalk.bold(`Step ${stepCount}`)} ${chalk.gray('→')} ${chalk.yellow(toolName)}${actionSegment}`,
       );
+      if (typeof onToolCall === 'function') {
+        onToolCall({
+          id: event.id,
+          toolName,
+          args: event.args,
+        });
+      }
       stepCount += 1;
     } else if (event.type === 'tool_result') {
       const entry =
@@ -617,6 +626,13 @@ const playAgentTimeline = async (events, renderer) => {
       if (event.toolName) {
         toolActions.delete(event.toolName);
       }
+      if (typeof onToolResult === 'function') {
+        onToolResult({
+          id: event.id,
+          toolName: resolvedName,
+          output: event.output,
+        });
+      }
     }
   }
 };
@@ -625,12 +641,81 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
   renderUserInput(input);
   const renderer = createThoughtRenderer();
   renderer.start(DEFAULT_THOUGHT_TEXT);
+  const turnStart = process.hrtime.bigint();
+  const initialUsage =
+    typeof agent.getTokenUsage === 'function'
+      ? { ...agent.getTokenUsage() }
+      : null;
+  const activeToolKeys = new Set();
+  const toolKeyById = new Map();
+  const toolQueueByName = new Map();
+  const trackedToolCallIds = new Set();
+
+  const registerToolStart = (identifier, toolName) => {
+    if (identifier && trackedToolCallIds.has(identifier)) {
+      return;
+    }
+    if (identifier) {
+      trackedToolCallIds.add(identifier);
+    }
+    const key = telemetry.startToolInvocation({
+      id: identifier,
+      name: toolName,
+      sessionId,
+    });
+    activeToolKeys.add(key);
+    if (identifier) {
+      toolKeyById.set(identifier, key);
+    } else if (toolName) {
+      const queue = toolQueueByName.get(toolName) ?? [];
+      queue.push(key);
+      toolQueueByName.set(toolName, queue);
+    }
+  };
+
+  const resolveToolKey = (identifier, toolName) => {
+    if (identifier && toolKeyById.has(identifier)) {
+      const key = toolKeyById.get(identifier);
+      toolKeyById.delete(identifier);
+      return key;
+    }
+    if (toolName && toolQueueByName.has(toolName)) {
+      const queue = toolQueueByName.get(toolName);
+      if (queue && queue.length) {
+        const key = queue.shift();
+        if (!queue.length) {
+          toolQueueByName.delete(toolName);
+        } else {
+          toolQueueByName.set(toolName, queue);
+        }
+        return key;
+      }
+    }
+    return null;
+  };
+
+  const finalizeTool = (identifier, toolName, { success = true, error } = {}) => {
+    const key = resolveToolKey(identifier, toolName);
+    if (!key) {
+      return;
+    }
+    if (activeToolKeys.has(key)) {
+      activeToolKeys.delete(key);
+    }
+    if (identifier) {
+      trackedToolCallIds.delete(identifier);
+    }
+    telemetry.finishToolInvocation(key, { success, error });
+  };
 
   const supportsStreaming = typeof agent.streamInvoke === 'function';
   let streamedHeaderShown = false;
   let needsNewline = false;
   let printedChunks = false;
   const streamToolActions = new Map();
+  const pendingStreamToolIds = new Set();
+  let turnCompleted = false;
+  let turnErrorMessage;
   const mergeArgumentText = (existing = '', addition = '') => {
     if (!addition) {
       return existing || '';
@@ -793,6 +878,11 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
             if (!keys.length) {
               return;
             }
+            const pendingKey = toolCallId || toolName;
+            if (pendingKey && !pendingStreamToolIds.has(pendingKey)) {
+              registerToolStart(toolCallId, toolName);
+              pendingStreamToolIds.add(pendingKey);
+            }
             upsertStreamAction({
               keys,
               name: toolName,
@@ -858,7 +948,9 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
         const entry = getStreamAction(toolCallId, toolName);
         const resolvedName = entry?.name || toolName;
         renderToolOutput(resolvedName, text);
+        finalizeTool(toolCallId, resolvedName, { success: true });
         deleteStreamAction(toolCallId, toolName, entry?.name);
+        pendingStreamToolIds.delete(toolCallId || resolvedName || toolName);
       }
     }
 
@@ -872,6 +964,7 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
           const toolInput = task.input?.tool_input ?? task.input;
           const actionSummary = summarizeActionArgs(toolInput);
           const toolCallId = task.tool_call_id || task.id;
+          registerToolStart(toolCallId, toolNameHint);
           upsertStreamAction({
             keys: [toolCallId, toolNameHint, task.name],
             name: toolNameHint,
@@ -888,6 +981,8 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
           const toolCallId = task.tool_call_id || task.id;
           const toolNameHint =
             typeof task.result?.tool_name === 'string' ? task.result.tool_name : task.name || 'tool';
+          finalizeTool(toolCallId, toolNameHint, { success: true });
+          pendingStreamToolIds.delete(toolCallId || toolNameHint || task.name);
           deleteStreamAction(toolCallId, toolNameHint, task.name);
         }
       }
@@ -915,7 +1010,10 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
         ? response.eventMessages
         : allMessages.slice(0, -1);
       const events = extractAgentEvents(eventMessages);
-      await playAgentTimeline(events, renderer);
+      await playAgentTimeline(events, renderer, {
+        onToolCall: ({ id, toolName }) => registerToolStart(id, toolName),
+        onToolResult: ({ id, toolName }) => finalizeTool(id, toolName, { success: true }),
+      });
     }
 
     const allMessages = Array.isArray(response?.messages) ? response.messages : [];
@@ -935,11 +1033,54 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
     }
 
     renderer.succeed('Thought process complete');
+    turnCompleted = true;
   } catch (error) {
     renderer.fail(`AIra error: ${error.message}`);
+    turnErrorMessage = error.message;
+    activeToolKeys.forEach((key) => {
+      telemetry.finishToolInvocation(key, { success: false, error: error.message });
+    });
+    activeToolKeys.clear();
+    toolKeyById.clear();
+    toolQueueByName.clear();
+    pendingStreamToolIds.clear();
     throw error;
   } finally {
     cliCursor.show();
+    const finalUsage =
+      typeof agent.getTokenUsage === 'function'
+        ? { ...agent.getTokenUsage() }
+        : null;
+    const inputDelta =
+      initialUsage && finalUsage
+        ? Math.max(0, (finalUsage.input ?? 0) - (initialUsage.input ?? 0))
+        : finalUsage?.input ?? 0;
+    const outputDelta =
+      initialUsage && finalUsage
+        ? Math.max(0, (finalUsage.output ?? 0) - (initialUsage.output ?? 0))
+        : finalUsage?.output ?? 0;
+    const durationMs = Number((process.hrtime.bigint() - turnStart) / 1_000_000n);
+    if (activeToolKeys.size) {
+      activeToolKeys.forEach((key) => {
+        telemetry.finishToolInvocation(key, {
+          success: false,
+          error: turnErrorMessage || 'Tool invocation did not complete before turn end.',
+        });
+      });
+      activeToolKeys.clear();
+    }
+    toolKeyById.clear();
+    toolQueueByName.clear();
+    pendingStreamToolIds.clear();
+    const turnSuccess = Boolean(turnCompleted);
+    telemetry.recordTurn({
+      sessionId,
+      durationMs: Number.isFinite(durationMs) ? durationMs : 0,
+      success: turnSuccess,
+      inputTokens: inputDelta,
+      outputTokens: outputDelta,
+      error: turnSuccess ? undefined : turnErrorMessage || 'Turn ended with errors.',
+    });
   }
 };
 
@@ -1217,6 +1358,10 @@ const parseCliArgs = () => {
       options.diagnostics.enabled = true;
       continue;
     }
+    if (arg === '--health') {
+      options.mode = 'health';
+      continue;
+    }
     if (arg === '--fix') {
       options.diagnostics.autoFix = true;
       continue;
@@ -1275,6 +1420,13 @@ const parseCliArgs = () => {
 
 const main = async () => {
   const cliOptions = parseCliArgs();
+
+  if (cliOptions.mode === 'health') {
+    const report = await runHealthCheck();
+    console.log(JSON.stringify(report, null, 2));
+    process.exitCode = report.status === 'ok' ? 0 : 1;
+    return;
+  }
 
   if (cliOptions.mode === 'diagnostics') {
     const { diagnostics } = cliOptions;

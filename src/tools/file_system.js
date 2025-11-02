@@ -3,6 +3,7 @@ import path from 'path';
 import { glob } from 'glob';
 import { detectSystemInfo } from '../utils/system.js';
 import { IGNORED_GLOB_PATTERNS, filterIgnoredEntries, isPathIgnored } from '../utils/ignore.js';
+import { ensureReadAllowed, ensureWriteAllowed } from '../utils/security.js';
 
 const ENCODING = 'utf-8';
 
@@ -105,6 +106,7 @@ export const readFile = async (filePath) => {
   try {
     const systemInfo = detectSystemInfo();
     resolvedPath = resolvePathForOS(filePath, systemInfo);
+    ensureReadAllowed(resolvedPath);
     if (isPathIgnored(resolvedPath)) {
       return `Access to ${resolvedPath} is blocked because it resides in an ignored directory.`;
     }
@@ -118,6 +120,7 @@ export const readFile = async (filePath) => {
       try {
         const fallback = await attemptResolveExistingPath(filePath, { type: 'file' });
         if (fallback) {
+          ensureReadAllowed(fallback);
           const content = await fs.readFile(fallback, ENCODING);
           return content;
         }
@@ -145,6 +148,7 @@ export const writeFile = async (filePath, content) => {
   try {
     const systemInfo = detectSystemInfo();
     resolvedPath = resolvePathForOS(filePath, systemInfo);
+    ensureWriteAllowed(resolvedPath);
     if (isPathIgnored(resolvedPath)) {
       return 'Error writing to file: target path is inside an ignored directory.';
     }
@@ -174,11 +178,13 @@ export const resolveFilePath = async (filePath) => {
   const systemInfo = detectSystemInfo();
   const direct = resolvePathForOS(filePath, systemInfo);
   if (!isPathIgnored(direct) && (await fileExists(direct))) {
+    ensureReadAllowed(direct);
     return direct;
   }
 
   const fallback = await attemptResolveExistingPath(filePath, { type: 'file' });
   if (fallback) {
+    ensureReadAllowed(fallback);
     return fallback;
   }
 
@@ -202,9 +208,11 @@ export const listDirectory = async (directoryPath) => {
         type: 'directory',
       });
       if (fallback) {
+        ensureReadAllowed(fallback);
         directoryToRead = fallback;
       }
     }
+    ensureReadAllowed(directoryToRead);
     if (isPathIgnored(directoryToRead)) {
       return 'Access to this directory is blocked because it resides in an ignored path.';
     }
