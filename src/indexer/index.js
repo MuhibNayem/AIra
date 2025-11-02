@@ -296,6 +296,7 @@ const handleBuild = async (options) => {
         ...result.metadata.persistence.metadata,
         status: scanRecord ? 'ready' : 'pending',
         path: path.join(indexRoot, 'index.db'),
+      },
     };
     initializedMetadata.artifacts = {
       metadataPath: __internals.resolveMetadataPath(targetCwd),
