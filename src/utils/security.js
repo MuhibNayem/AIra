@@ -1,5 +1,16 @@
 import path from 'path';
 import readline from 'readline';
+import cliCursor from 'cli-cursor';
+
+let ioProvider = () => ({ stdin: process.stdin, stdout: process.stdout });
+
+export const __setSecurityIO = (provider) => {
+  if (typeof provider === 'function') {
+    ioProvider = provider;
+    return;
+  }
+  ioProvider = () => ({ stdin: process.stdin, stdout: process.stdout });
+};
 
 const DEFAULT_SHELL_BLOCKLIST = [
   'rm',
@@ -128,44 +139,109 @@ const shouldAllowFromOverrides = (head, fullCommand) => {
 };
 
 const promptShellOverride = async ({ command, head }) => {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-  });
+  const { stdin, stdout } = ioProvider();
+  const interactive = stdin && stdout && stdin.isTTY && stdout.isTTY;
+  const supportsRawMode =
+    interactive && typeof stdin.setRawMode === 'function';
 
-  const ask = () =>
-    new Promise((resolve) => {
-      rl.question(
-        `Command "${command}" is blocked by policy.\n` +
-          'Choose an option:\n' +
-          '  1) Allow this command once\n' +
-          '  2) Allow for this session\n' +
-          '  3) Do not allow (default)\n' +
-          'Selection [3]: ',
-        (answer) => resolve(answer.trim()),
-      );
+  const message =
+    `Command "${command}" is blocked by policy.\n` +
+    'Choose an option:\n' +
+    '  1) Allow this command once\n' +
+    '  2) Allow for this session\n' +
+    '  3) Do not allow (default)\n' +
+    'Selection [3]: ';
+
+  if (!supportsRawMode) {
+    const rl = readline.createInterface({
+      input: stdin,
+      output: stdout,
+      terminal: true,
     });
 
-  let choice;
-  try {
-    choice = await ask();
-  } finally {
-    rl.close();
+    const ask = () =>
+      new Promise((resolve) => {
+        rl.question(message, (answer) => resolve(answer.trim()));
+      });
+
+    let choice;
+    try {
+      cliCursor.show();
+      choice = await ask();
+    } finally {
+      rl.close();
+      cliCursor.hide();
+    }
+
+    const normalized = choice ? choice.trim().charAt(0) : '';
+    if (normalized === '1') {
+      singleUseAllowances.add(command);
+      return { decision: 'once' };
+    }
+    if (normalized === '2') {
+      sessionAllowances.add(head);
+      sessionAllowances.add(command);
+      return { decision: 'session' };
+    }
+    return { decision: 'deny' };
   }
 
-  const normalized = choice ? choice.trim().charAt(0) : '';
+  cliCursor.show();
+  stdout.write(message);
 
-  if (normalized === '1') {
-    singleUseAllowances.add(command);
-    return { decision: 'once' };
-  }
-  if (normalized === '2') {
-    sessionAllowances.add(head);
-    sessionAllowances.add(command);
-    return { decision: 'session' };
-  }
-  return { decision: 'deny' };
+  return new Promise((resolve) => {
+    const cleanup = (decision) => {
+      if (typeof stdin.off === 'function') {
+        stdin.off('data', onData);
+      } else if (typeof stdin.removeListener === 'function') {
+        stdin.removeListener('data', onData);
+      }
+      stdin.setRawMode(false);
+      cliCursor.hide();
+      stdout.write('\n');
+      resolve(decision);
+    };
+
+    const onData = (buffer) => {
+      const input = buffer?.toString('utf8') ?? '';
+      if (!input) {
+        return;
+      }
+
+      const byte = input[0];
+      if (byte === '\u0003') {
+        cleanup({ decision: 'deny' });
+        return;
+      }
+
+      const normalized = input.trim().charAt(0);
+      if (normalized === '1') {
+        singleUseAllowances.add(command);
+        cleanup({ decision: 'once' });
+        return;
+      }
+      if (normalized === '2') {
+        sessionAllowances.add(head);
+        sessionAllowances.add(command);
+        cleanup({ decision: 'session' });
+        return;
+      }
+      if (normalized === '' || normalized === '3' || normalized === '\r' || normalized === '\n') {
+        cleanup({ decision: 'deny' });
+        return;
+      }
+
+      stdout.write('\nPlease enter 1, 2, or press Enter for 3: ');
+    };
+
+    stdin.setRawMode(true);
+    if (typeof stdin.resume === 'function') {
+      stdin.resume();
+    }
+    if (typeof stdin.on === 'function') {
+      stdin.on('data', onData);
+    }
+  });
 };
 
 export const ensureShellCommandAllowed = async (

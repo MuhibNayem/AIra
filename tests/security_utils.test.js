@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'path';
+import { EventEmitter } from 'events';
+import cliCursor from 'cli-cursor';
 
 const responseQueue = [];
 const closeMock = vi.fn();
@@ -22,6 +24,7 @@ const {
   ensureWriteAllowed,
   ensureShellCommandAllowed,
   resetSecurityOverrides,
+  __setSecurityIO,
 } = security;
 
 describe('security utils', () => {
@@ -58,6 +61,7 @@ describe('security utils', () => {
       process.env.AIRA_FS_READ_ROOTS = originalReadRoots;
     }
     resetSecurityOverrides();
+    __setSecurityIO(null);
   });
 
   it('allows reads within the project root', () => {
@@ -119,5 +123,53 @@ describe('security utils', () => {
       undefined,
     );
     expect(closeMock).toHaveBeenCalled();
+  });
+
+  const createRawIO = () => {
+    const stdin = new EventEmitter();
+    stdin.isTTY = true;
+    stdin.setRawMode = vi.fn();
+    stdin.resume = vi.fn();
+    stdin.on = stdin.addListener.bind(stdin);
+    stdin.off = stdin.removeListener.bind(stdin);
+    const stdout = { isTTY: true, write: vi.fn() };
+    return { stdin, stdout };
+  };
+
+  it('uses raw-mode input when available', async () => {
+    const { stdin, stdout } = createRawIO();
+    const showSpy = vi.spyOn(cliCursor, 'show').mockImplementation(() => {});
+    const hideSpy = vi.spyOn(cliCursor, 'hide').mockImplementation(() => {});
+
+    __setSecurityIO(() => ({ stdin, stdout }));
+
+    const promise = ensureShellCommandAllowed('rm raw', { interactive: true });
+    stdin.emit('data', Buffer.from('2'));
+    await expect(promise).resolves.toBeUndefined();
+
+    expect(stdin.setRawMode).toHaveBeenCalledWith(true);
+    expect(showSpy).toHaveBeenCalled();
+    expect(hideSpy).toHaveBeenCalled();
+
+    showSpy.mockRestore();
+    hideSpy.mockRestore();
+    __setSecurityIO(null);
+  });
+
+  it('defaults to deny for invalid raw-mode input', async () => {
+    const { stdin, stdout } = createRawIO();
+    const showSpy = vi.spyOn(cliCursor, 'show').mockImplementation(() => {});
+    const hideSpy = vi.spyOn(cliCursor, 'hide').mockImplementation(() => {});
+    __setSecurityIO(() => ({ stdin, stdout }));
+
+    const promise = ensureShellCommandAllowed('rm bad', { interactive: true });
+    stdin.emit('data', Buffer.from('x'));
+    stdin.emit('data', Buffer.from('\r'));
+    await expect(promise).rejects.toThrow(/denied/);
+    expect(stdout.write).toHaveBeenCalledWith('\nPlease enter 1, 2, or press Enter for 3: ');
+
+    showSpy.mockRestore();
+    hideSpy.mockRestore();
+    __setSecurityIO(null);
   });
 });

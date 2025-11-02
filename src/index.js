@@ -17,7 +17,8 @@ import { GEMINI_CLI_AGENT_PROMPT } from './prompts/agent_prompts.js';
 import { resolveProjectPath } from './tools/path_tools.js';
 import { extractUpdatedCode } from './utils/refactor.js';
 import { createWebScraperTool } from './tools/web_scraper.js';
-import { createWebSearchTool } from './tools/web_search.js'; 
+import { createWebSearchTool } from './tools/web_search.js';
+import { createDirectoryTool, moveDirectoryTool, removeDirectoryTool } from './tools/directory_tools.js';
 import { runDiagnostics } from './diagnostics/onboarding.js';
 import { runHealthCheck } from './diagnostics/health_check.js';
 import { telemetry } from './utils/telemetry.js';
@@ -1332,6 +1333,10 @@ const buildTooling = (refactorChain, systemInfo) => {
   );
   registerTool(createWebScraperTool(), 'url: string');
   registerTool(createWebSearchTool(), 'query: string');
+
+  registerTool(createDirectoryTool, '{ path: string, recursive?: boolean }');
+  registerTool(moveDirectoryTool, '{ source: string, destination: string }');
+  registerTool(removeDirectoryTool, '{ path: string, recursive?: boolean }');
 
   return { tools, catalog };
 };
