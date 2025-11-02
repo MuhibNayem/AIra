@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import os from 'os';
-import { formatSystemPrompt, detectSystemInfo } from '../src/utils/system.js';
+import v8 from 'v8';
+import { formatSystemPrompt, detectSystemInfo, getMemoryUsage } from '../src/utils/system.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -98,5 +99,23 @@ describe('system utils', () => {
     const info = detectSystemInfo();
     expect(info.platform).toBe(process.platform);
     expect(info.shell).toBe(process.env.SHELL || (info.isWindows ? process.env.COMSPEC || 'C\\Windows\\System32\\cmd.exe' : '/bin/bash'));
+  });
+
+  it('reports memory usage metrics', () => {
+    const heapStatsSpy = vi.spyOn(v8, 'getHeapStatistics').mockReturnValue({ heap_size_limit: 1000 });
+    const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({
+      heapUsed: 100,
+      heapTotal: 200,
+      rss: 300,
+      external: 0,
+      arrayBuffers: 0,
+    });
+
+    const info = getMemoryUsage();
+    expect(info.heapUsed).toBe(100);
+    expect(info.remaining).toBe(900);
+
+    heapStatsSpy.mockRestore();
+    memorySpy.mockRestore();
   });
 });

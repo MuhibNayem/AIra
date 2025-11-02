@@ -428,3 +428,15 @@ export const extractSymbols = async ({ filePath, language }) => {
     diagnostics: result.diagnostics,
   };
 };
+
+export const __internals = {
+  createAccumulator,
+  rememberParent,
+  registerSymbol,
+  extractIdentifier,
+  extractModifiers,
+  extractParameters,
+  findFirstErrorNode,
+  walkTypeBody,
+  walkAst,
+};
