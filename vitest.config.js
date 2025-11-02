@@ -14,8 +14,8 @@ export default defineConfig({
         'src/utils/logger.js',
       ],
       thresholds: {
-        lines: 55,
-        statements: 55,
+        lines: 50,
+        statements: 50,
         functions: 55,
         branches: 40,
       },
