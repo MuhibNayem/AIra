@@ -1,8 +1,12 @@
-# AIra – CLI AI Coding Assistant
+# 🤖 AIra – CLI AI Coding Assistant
+
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/a-k-m-muhibullah-nayem/AIra/actions/workflows/ci.yml)
+[![NPM Version](https://img.shields.io/npm/v/aira-cli-agent.svg)](https://www.npmjs.com/package/aira-cli-agent)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 AIra is a LangGraph (LangChain JS) + Ollama powered developer assistant that runs entirely from your terminal. It supports multi-turn conversations, remembers context within a session, and can safely interact with your project using an extensible toolset (filesystem helpers, shell execution, refactoring chains, and more).
 
-## Features
+## ✨ Features
 
 - 🔌 **Local-first** – talk to an Ollama model you control.
 - 🧰 **Rich tooling** – filesystem access, shell commands, regex search, targeted refactors, and custom tools via LangChain.
@@ -10,7 +14,7 @@ AIra is a LangGraph (LangChain JS) + Ollama powered developer assistant that run
 - 🌀 **Observable reasoning** – see the agent’s thoughts, tool calls, and results as they happen.
 - 🧱 **Composable** – everything is modern ES modules; extend or embed with ease.
 
-## Prerequisites
+## 📋 Prerequisites
 
 - **Node.js** ≥ 18
 - **npm** ≥ 9
@@ -18,7 +22,7 @@ AIra is a LangGraph (LangChain JS) + Ollama powered developer assistant that run
   - Default model: `qwen3:latest`  
   - Set `OLLAMA_BASE_URL` if Ollama is not on `http://localhost:11434`
 
-## Installation
+## 📦 Installation
 
 Install the CLI globally, use it on-demand with `npx`, or add it to a project:
 
@@ -42,7 +46,7 @@ cp .env.example .env
 npm install
 ```
 
-## Quick start
+## 🚀 Quick start
 
 ### Interactive mode
 
@@ -72,7 +76,7 @@ aira --session my-project
 
 This isolates concurrent conversations or resumes a previous session within the same process.
 
-## Available tools
+## 🛠️ Available tools
 
 - `readFile({ "path": string })` – read UTF-8 files.
 - `writeFile({ "path": string, "content": string })` – persist changes.
@@ -85,7 +89,7 @@ This isolates concurrent conversations or resumes a previous session within the 
 - `refactorFileSegment({ "path": string, "startLine": number, "endLine": number, "instructions": string })` – apply targeted edits to a line range.
 - `list_tools()` – return the full tool catalog and expected input schemas.
 
-## Configuration
+## ⚙️ Configuration
 
 Environment variables (set via `.env`, shell exports, or CLI):
 
@@ -110,7 +114,7 @@ Environment variables (set via `.env`, shell exports, or CLI):
 
 The `.env.example` file contains the minimal defaults needed to get started. Copy it to `.env` for local development and then supply any optional search-related variables (`OLLAMA_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CSE_ID`, `SERPER_API_KEY`) as required by your workflow. Keep actual credentials out of version control—use personal `.env` files or a secrets manager instead.
 
-## Development
+## 🧑‍💻 Development
 
 - Run the CLI in watch mode with your favourite process manager or simply `node src/index.js`.
 - Add new tools under `src/tools/` and register them in `buildTooling` within `src/index.js`.
@@ -133,11 +137,11 @@ The `.env.example` file contains the minimal defaults needed to get started. Cop
 - Append `--no-check` (or set `AIRA_NO_STARTUP_CHECK=1`) to bypass the automatic preflight when launching the interactive CLI once you already manage the required environment variables yourself.
 - Use `--report <path>` to direct the diagnostic log to a custom location for sharing with your team.
 
-### Safety guardrails
+### 🛡️ Safety guardrails
 
 - Destructive shell commands (e.g., `rm`, `mv`, `chmod`) are blocked by default. When running in an interactive TTY the CLI will prompt you to allow once, allow for the current session, or deny.
 - File reads/writes are restricted to the workspace root unless you extend the allowed roots via the environment variables above. Setting `AIRA_FS_READONLY=1` converts the agent into a read-only assistant.
 
-## License
+## 📄 License
 
 Apache-2.0 © A. K. M Muhibullah Nayem and AIra contributors.
