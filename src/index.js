@@ -22,6 +22,7 @@ import { createDirectoryTool, moveDirectoryTool, removeDirectoryTool } from './t
 import { runDiagnostics } from './diagnostics/onboarding.js';
 import { runHealthCheck } from './diagnostics/health_check.js';
 import { telemetry } from './utils/telemetry.js';
+import { handleIndexCommand } from './indexer/index.js';
 
 const EXIT_COMMANDS = new Set(['exit', 'quit', 'q']);
 const DEFAULT_THOUGHT_TEXT = 'Analyzing request...';
@@ -1341,8 +1342,56 @@ const buildTooling = (refactorChain, systemInfo) => {
   return { tools, catalog };
 };
 
+const INDEX_SUBCOMMANDS = new Set(['build', 'status', 'prune', 'watch', 'config']);
+
+const parseIndexArgs = (args) => {
+  const [maybeCommand, ...rest] = args;
+  const command = INDEX_SUBCOMMANDS.has(maybeCommand) ? maybeCommand : 'status';
+  const flags = rest.reduce(
+    (accumulator, current, index) => {
+      if (!current.startsWith('--')) {
+        accumulator.positionals.push(current);
+        return accumulator;
+      }
+      const key = current.replace(/^--/, '');
+      const value = rest[index + 1] && !rest[index + 1].startsWith('--') ? rest[index + 1] : true;
+      accumulator.options[key] = value;
+      if (value !== true) {
+        rest[index + 1] = '';
+      }
+      return accumulator;
+    },
+    { command, options: {}, positionals: [] },
+  );
+
+  return {
+    mode: 'index',
+    sessionId: process.env.AIRA_SESSION_ID || 'cli-session',
+    skipStartupCheck: false,
+    diagnostics: {
+      enabled: false,
+      autoFix: false,
+      skipPull: false,
+      skipSelfCheck: false,
+      reportPath: undefined,
+    },
+    index: {
+      enabled: true,
+      command,
+      rawArgs: args,
+      options: flags.options,
+      positionals: flags.positionals.filter(Boolean),
+    },
+  };
+};
+
 const parseCliArgs = () => {
   const args = process.argv.slice(2);
+
+  if (args[0] === 'index') {
+    return parseIndexArgs(args.slice(1));
+  }
+
   const options = {
     mode: 'interactive',
     sessionId: process.env.AIRA_SESSION_ID || 'cli-session',
@@ -1444,6 +1493,12 @@ const main = async () => {
     if (!result.success) {
       process.exitCode = 1;
     }
+    return;
+  }
+
+  if (cliOptions.mode === 'index') {
+    const indexResult = await handleIndexCommand(cliOptions.index);
+    process.exitCode = typeof indexResult?.exitCode === 'number' ? indexResult.exitCode : 0;
     return;
   }
 

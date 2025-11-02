@@ -21,6 +21,25 @@
 - Enable non-interactive batch mode that consumes task files/specs.
 - Integrate job queue or scheduler for running multiple requests sequentially with status reporting.
 
+### 2.3 Git Integration
+- **Goal:** Give the agent contextual awareness of the version control state and the ability to automate common Git operations.
+- **Tooling:** Implement tools that can read `git status`, `git diff`, and `git log`.
+- **Automated Commit Messages:** Create a workflow where the agent can be asked to "write a commit message." It will run `git diff --staged`, analyze the changes, and propose a well-formatted message that follows Conventional Commits standards.
+- **Change Summarization:** Allow developers to ask "What have I been working on?" The agent would use the git log and diffs to provide a concise summary of recent changes, aiding in daily stand-ups or progress reports.
+- **Branch Management:** Basic but essential workflows for creating, listing, and switching branches to reduce context-switching for the developer.
+
+### 2.4 Project-Wide Refactoring
+- **Goal:** Evolve beyond single-file edits to perform complex, structural changes across the entire codebase safely and efficiently.
+- **Leverage the Code Index:** This workflow is critically dependent on the symbol and embedding index. The agent will use the index to find all usages of a function, class, or variable, ensuring no instance is missed.
+- **Interactive Workflow:** For safety, this will be a guided process:
+    1. User requests a project-wide change (e.g., "Rename the `old_fn` function to `new_fn`").
+    2. Agent uses the index to find all affected files and presents a list to the user for confirmation.
+    3. Upon approval, the agent creates a new branch and systematically applies the edits, verifying each change.
+- **Use Cases:**
+    - Renaming exported functions, classes, or types.
+    - Changing the signature of a function and updating all its call sites.
+    - Migrating from a deprecated internal API to a new one.
+
 ## 3. Integrations & Extensibility
 
 ### 3.1 IDE & API Hooks

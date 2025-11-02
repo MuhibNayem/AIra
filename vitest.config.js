@@ -7,7 +7,7 @@ export default defineConfig({
       provider: 'v8',
       reportsDirectory: 'coverage',
       reporter: ['text', 'lcov'],
-      include: ['src/tools/**/*.js', 'src/utils/**/*.js'],
+      include: ['src/tools/**/*.js', 'src/utils/**/*.js', 'src/indexer/**/*.js'],
       exclude: [
         'src/tools/web_scraper.js',
         'src/tools/web_search.js',

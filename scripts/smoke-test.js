@@ -61,6 +61,7 @@ const main = async () => {
       throw new Error('Smoke test: listDirectory did not return created file.');
     }
 
+    console.log('Index command smoke test placeholder: skipping (feature in development).');
     console.log('AIra smoke test passed.');
   } catch (error) {
     console.error('AIra smoke test failed:', error instanceof Error ? error.message : error);
