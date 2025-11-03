@@ -24,21 +24,54 @@ This document breaks down the work required to add a production-grade, local-fir
   - [x] Implement error handling for unparsable files (record diagnostics, skip gracefully).
   - [x] Implement file discovery and language detection scaffolding (extension-based scan).
 - **1.2 Data Model**
-  - [ ] Define tables for symbols, definitions, references, inheritance, and call graph edges.
-  - [ ] Store per-file hashes to detect when re-indexing is necessary.
-  - [ ] Record language, module path, and owning package/service tags.
+  - [x] Define tables for symbols, definitions, references, inheritance, and call graph edges.
+  - [x] Store per-file hashes to detect when re-indexing is necessary.
+  - [x] Record language, module path, and owning package/service tags.
   - [x] Bootstrap index metadata scaffold (`metadata.json`) for tracking schema version and timestamps.
   - [x] Create SQLite schema for scans and file catalog (see `docs/indexing-metadata-schema.md`).
+
+The data model is implemented in a SQLite database with the following schema:
+
+*   **scans**: Records metadata about each indexing operation.
+    *   `id`: Primary key.
+    *   `started_at`, `completed_at`: Timestamps for the scan.
+    *   `total_files`, `pattern`, `duration_ms`, `notes`: Details of the scan.
+
+*   **files**: A catalog of all indexed files.
+    *   `id`: Primary key.
+    *   `path`: Unique path to the file.
+    *   `language`: Detected language of the file.
+    *   `hash`: Hash of the file content, for change detection.
+    *   `size`: File size in bytes.
+    *   `last_indexed_at`: Timestamp of the last indexing.
+    *   `last_scan_id`: Foreign key to the `scans` table.
+
+*   **symbols**: Stores information about each symbol (e.g., function, class, variable) extracted from the files.
+    *   `id`: Primary key.
+    *   `file_id`: Foreign key to the `files` table.
+    *   `scan_id`: Foreign key to the `scans` table.
+    *   `name`: The name of the symbol.
+    *   `kind`: The type of symbol (e.g., `function`, `class`).
+    *   `signature`: The symbol's signature.
+    *   `line`: The line number where the symbol is defined.
+    *   `metadata`: A JSON blob for additional language-specific information.
+
+*   **relations**: Describes the relationships between symbols.
+    *   `id`: Primary key.
+    *   `source_symbol_id`: Foreign key to the `symbols` table for the source of the relation.
+    *   `target_symbol_id`: Foreign key to the `symbols` table for the target of the relation.
+    *   `kind`: The type of relationship (e.g., `calls`, `inherits`, `references`).
+    *   `scan_id`: Foreign key to the `scans` table.
 - **1.3 Storage Adapter**
   - [x] Implement a Node module that writes/queries the index (using SQLite CLI bindings).
-  - [ ] Build migrations to upgrade schema versions without losing prior data.
-  - [ ] Add read filters that respect `AIRA_FS_READ_ROOTS` and ACL rules.
+  - [x] Build migrations to upgrade schema versions without losing prior data.
+  - [x] Add read filters that respect `AIRA_FS_READ_ROOTS` and ACL rules.
 - **1.4 CLI Integration**
   - [x] `aira index build` should parse files, populate the store, and emit progress.
   - [x] `aira index build` enumerates source files and records scan summaries.
   - [x] `aira index status` returns index age, file counts, and schema version.
   - [x] Expose preview configuration via `aira index config`.
-  - [ ] Expose a programmatic API (`src/indexer/symbols.js`) consumable by the agent.
+  - [x] Expose a programmatic API (`src/indexer/symbols.js`) consumable by the agent.
 
 ## 2. Semantic Embeddings Layer
 

@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2025-11-03T08:37:30.841Z",
+  "updatedAt": "2025-11-03T09:33:32.254Z",
+  "filesIndexed": 61,
+  "languages": [
+    "javascript"
+  ],
+  "state": "indexed",
+  "notes": "Index scaffold created. Run indexing pipelines to populate symbol and embedding data.",
+  "resources": {
+    "maxWorkers": 22,
+    "maxMemoryMb": 1024,
+    "diskBudgetMb": 2048
+  },
+  "persistence": {
+    "metadata": {
+      "driver": "sqlite",
+      "path": "/home/amnayem/Projects/AIra/.aira/index/index.db",
+      "status": "ready"
+    },
+    "vectors": {
+      "driver": "chroma",
+      "path": "/home/amnayem/Projects/AIra/.aira/index/chroma",
+      "status": "pending"
+    }
+  },
+  "acl": {
+    "enforced": true,
+    "readRoots": [
+      "/home/amnayem/Projects/AIra"
+    ],
+    "writeRoots": [
+      "/home/amnayem/Projects/AIra"
+    ]
+  },
+  "parsers": {
+    "python": {
+      "strategy": "tree-sitter",
+      "status": "pending"
+    },
+    "java": {
+      "strategy": "jdt+lsp",
+      "status": "pending"
+    },
+    "javascript": {
+      "strategy": "tree-sitter",
+      "status": "ready"
+    },
+    "typescript": {
+      "strategy": "tree-sitter",
+      "status": "pending"
+    },
+    "go": {
+      "strategy": "tree-sitter",
+      "status": "pending"
+    }
+  },
+  "artifacts": {
+    "metadataPath": "/home/amnayem/Projects/AIra/.aira/index/metadata.json",
+    "indexRoot": "/home/amnayem/Projects/AIra/.aira/index"
+  },
+  "errors": [
+    {
+      "at": "2025-11-03T09:32:49.465Z",
+      "message": "DB_FILENAME is not defined",
+      "severity": "error"
+    },
+    {
+      "at": "2025-11-03T09:33:08.296Z",
+      "message": "sqliteVerified is not defined",
+      "severity": "error"
+    }
+  ],
+  "lastCommand": {
+    "type": "build",
+    "at": "2025-11-03T09:33:32.062Z",
+    "options": {}
+  },
+  "lastScan": {
+    "at": "2025-11-03T09:33:32.062Z",
+    "cwd": "/home/amnayem/Projects/AIra",
+    "totalFiles": 61,
+    "countsByLanguage": {
+      "javascript": 61
+    },
+    "countsByExtension": {
+      "js": 61
+    },
+    "durationMs": 18,
+    "pattern": "**/*.{js,jsx,ts,tsx,py,go,java}",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".py",
+      ".go",
+      ".java"
+    ],
+    "scanId": 2,
+    "relations": [
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#constructor:28:84912b8e6b4f",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      },
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#configureStream:53:7ed3e99839d4",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      },
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#write:67:60367fb95355",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      },
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#recordTurn:89:44262777b165",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      },
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#startToolInvocation:106:2f562c939605",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      },
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#finishToolInvocation:115:267c91452a07",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      },
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#recordDiagnosticsRun:140:2bcd1b545188",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      },
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#getSummary:157:cc71372d16bc",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      },
+      {
+        "type": "belongs_to",
+        "sourceId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#close:161:92f6e6b67215",
+        "targetId": "/home/amnayem/Projects/AIra/src/utils/telemetry.js#Telemetry:27:ba9970155b98",
+        "properties": {
+          "role": "member"
+        },
+        "filePath": "/home/amnayem/Projects/AIra/src/utils/telemetry.js"
+      }
+    ],
+    "relationCount": 9,
+    "symbolCount": 272
+  }
+}

@@ -1,5 +1,7 @@
+
 import { promises as fs } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 
@@ -93,49 +95,41 @@ const runJsonQuery = async (dbPath, sql) => {
 
 const getDbPath = (indexRoot) => path.join(indexRoot, DB_FILENAME);
 
+const getCurrentVersion = async (dbPath) => {
+  const result = await runJsonQuery(dbPath, 'PRAGMA user_version');
+  return result[0]?.user_version || 0;
+};
+
+const runMigrations = async (dbPath) => {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const migrationsDir = path.resolve(__dirname, 'migrations');
+  const files = await fs.readdir(migrationsDir);
+  const migrationFiles = files.filter(f => f.endsWith('.js')).sort();
+
+  let currentVersion = await getCurrentVersion(dbPath);
+
+  for (const file of migrationFiles) {
+    const version = parseInt(file.split('_')[0], 10);
+    if (version > currentVersion) {
+      const migration = await import(path.join(migrationsDir, file));
+      if (migration.up) {
+        await runSqlScript(dbPath, migration.up);
+        await runSqlScript(dbPath, [`PRAGMA user_version = ${version}`]);
+        currentVersion = version;
+      }
+    }
+  }
+};
+
 export const ensureSchema = async (indexRoot) => {
   await fs.mkdir(indexRoot, { recursive: true });
   const dbPath = getDbPath(indexRoot);
-  await runSqlScript(dbPath, [
-    "PRAGMA journal_mode=WAL",
-    `CREATE TABLE IF NOT EXISTS scans (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      started_at TEXT NOT NULL,
-      completed_at TEXT NOT NULL,
-      total_files INTEGER NOT NULL,
-      pattern TEXT,
-      duration_ms INTEGER,
-      notes TEXT
-    )`,
-    `CREATE TABLE IF NOT EXISTS files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      path TEXT NOT NULL UNIQUE,
-      language TEXT,
-      hash TEXT,
-      size INTEGER,
-      last_indexed_at TEXT,
-      last_scan_id INTEGER,
-      metadata TEXT,
-      FOREIGN KEY(last_scan_id) REFERENCES scans(id) ON DELETE SET NULL
-    )`,
-    'CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)',
-    'CREATE INDEX IF NOT EXISTS idx_files_language ON files(language)',
-    `CREATE TABLE IF NOT EXISTS symbols (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      file_id INTEGER NOT NULL,
-      scan_id INTEGER,
-      name TEXT,
-      kind TEXT,
-      signature TEXT,
-      line INTEGER,
-      metadata TEXT,
-      FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE,
-      FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE SET NULL
-    )`,
-    'CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id)',
-    'CREATE INDEX IF NOT EXISTS idx_symbols_scan ON symbols(scan_id)',
-    'CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name)',
-  ]);
+  const dbExists = await fs.access(dbPath).then(() => true).catch(() => false);
+  if (!dbExists) {
+    await runSqlScript(dbPath, ['PRAGMA journal_mode=WAL']);
+  }
+  await runMigrations(dbPath);
   return dbPath;
 };
 
@@ -187,6 +181,21 @@ const buildSymbolInsertStatements = ({ entries, scanId, fileIdMap }) => {
   return { statements, fileIdsToClear };
 };
 
+const buildRelationInsertStatements = ({ relations, scanId, symbolIdMap }) => {
+  const statements = [];
+  relations.forEach(relation => {
+    const sourceId = symbolIdMap[relation.sourceId];
+    const targetId = symbolIdMap[relation.targetId];
+    if (sourceId && targetId) {
+      statements.push(
+        `INSERT INTO relations (source_symbol_id, target_symbol_id, kind, scan_id)
+         VALUES (${sourceId}, ${targetId}, '${escapeText(relation.kind)}', ${scanId})`
+      );
+    }
+  });
+  return statements;
+};
+
 export const recordFileScan = async ({
   indexRoot,
   summary,
@@ -218,7 +227,7 @@ export const recordFileScan = async ({
   );
 
   if (files.length) {
-    const statements = [
+    const fileInsertStatements = [
       'BEGIN',
       ...buildFileInsertStatements({
         files,
@@ -227,7 +236,7 @@ export const recordFileScan = async ({
       }),
       'COMMIT',
     ];
-    await runSqlScript(dbPath, statements);
+    await runSqlScript(dbPath, fileInsertStatements);
   }
 
   const fileRows = await runJsonQuery(
@@ -235,19 +244,35 @@ export const recordFileScan = async ({
     `SELECT id, path FROM files WHERE last_scan_id = ${scanId}`,
   );
   const fileIdMap = {};
-  fileRows.forEach((row) => {
+  const fileContentInsertStatements = [];
+  for (const row of fileRows) {
     fileIdMap[row.path] = row.id;
-  });
+    try {
+      const content = await fs.readFile(row.path, 'utf-8');
+      fileContentInsertStatements.push(
+        `INSERT INTO file_contents (file_id, content) VALUES (${row.id}, '${escapeText(content)}')`,
+      );
+    } catch (error) {
+      console.error(`Failed to read file content for FTS: ${row.path}, ${error.message}`);
+    }
+  }
+
+  if (fileContentInsertStatements.length > 0) {
+    await runSqlScript(dbPath, ['BEGIN', ...fileContentInsertStatements, 'COMMIT']);
+  }
 
   return { scanId, fileIdMap };
 };
 
-export const listFiles = async (indexRoot) => {
+export const listFiles = async (indexRoot, { readRoots = [] } = {}) => {
   const dbPath = getDbPath(indexRoot);
-  return runJsonQuery(
-    dbPath,
-    'SELECT path, language, last_indexed_at AS lastIndexedAt, last_scan_id AS lastScanId FROM files ORDER BY path',
-  );
+  let query = 'SELECT path, language, last_indexed_at AS lastIndexedAt, last_scan_id AS lastScanId FROM files';
+  if (readRoots.length > 0) {
+    const whereClauses = readRoots.map(root => `path LIKE '${escapeText(root)}%'`).join(' OR ');
+    query += ` WHERE ${whereClauses}`;
+  }
+  query += ' ORDER BY path';
+  return runJsonQuery(dbPath, query);
 };
 
 export const listScans = async (indexRoot) => {
@@ -282,16 +307,128 @@ export const upsertSymbols = async ({ indexRoot, scanId, symbols = [], fileIdMap
   return { inserted: statements.length };
 };
 
-export const listSymbols = async (indexRoot, { limit = 200 } = {}) => {
+export const upsertRelations = async ({ indexRoot, scanId, relations = [], symbolIdMap = {} }) => {
+  if (!Array.isArray(relations) || !relations.length) {
+    return { inserted: 0 };
+  }
+  const dbPath = await ensureSchema(indexRoot);
+  const statements = buildRelationInsertStatements({ relations, scanId, symbolIdMap });
+  if (!statements.length) {
+    return { inserted: 0 };
+  }
+  // For simplicity, we are not deleting old relations for now.
+  // A more robust implementation would clear old relations for the given scan.
+  await runSqlScript(dbPath, ['BEGIN', ...statements, 'COMMIT']);
+  return { inserted: statements.length };
+};
+
+
+export const listSymbols = async (indexRoot, { limit = 200, readRoots = [], name, kind, filePath } = {}) => {
   const dbPath = getDbPath(indexRoot);
-  return runJsonQuery(
-    dbPath,
-    `SELECT s.id, f.path AS filePath, s.name, s.kind, s.signature, s.line, s.scan_id AS scanId
+  let query = `SELECT s.id, f.path AS filePath, s.name, s.kind, s.signature, s.line, s.scan_id AS scanId
+     FROM symbols s
+     JOIN files f ON f.id = s.file_id`;
+  const whereConditions = [];
+
+  if (readRoots.length > 0) {
+    const rootClauses = readRoots.map(root => `f.path LIKE '${escapeText(root)}%'`);
+    whereConditions.push(`(${rootClauses.join(' OR ')})`);
+  }
+  if (name) {
+    whereConditions.push(`s.name LIKE '${escapeText(name)}%'`);
+  }
+  if (kind) {
+    whereConditions.push(`s.kind = '${escapeText(kind)}'`);
+  }
+  if (filePath) {
+    whereConditions.push(`f.path = '${escapeText(filePath)}'`);
+  }
+
+  if (whereConditions.length > 0) {
+    query += ` WHERE ${whereConditions.join(' AND ')}`;
+  }
+
+  query += ` ORDER BY s.id DESC LIMIT ${Math.max(1, Number(limit) || 200)}`;
+  return runJsonQuery(dbPath, query);
+};
+
+export const listRelations = async (indexRoot, { limit = 200, readRoots = [], kind, sourceSymbolId, targetSymbolId } = {}) => {
+  const dbPath = getDbPath(indexRoot);
+  let query = `SELECT r.id, r.kind, r.source_symbol_id, r.target_symbol_id, r.scan_id
+     FROM relations r
+     JOIN symbols s ON s.id = r.source_symbol_id
+     JOIN files f ON f.id = s.file_id`;
+  const whereConditions = [];
+
+  if (readRoots.length > 0) {
+    const rootClauses = readRoots.map(root => `f.path LIKE '${escapeText(root)}%'`);
+    whereConditions.push(`(${rootClauses.join(' OR ')})`);
+  }
+  if (kind) {
+    whereConditions.push(`r.kind = '${escapeText(kind)}'`);
+  }
+  if (sourceSymbolId) {
+    whereConditions.push(`r.source_symbol_id = ${Number(sourceSymbolId)}`);
+  }
+  if (targetSymbolId) {
+    whereConditions.push(`r.target_symbol_id = ${Number(targetSymbolId)}`);
+  }
+
+  if (whereConditions.length > 0) {
+    query += ` WHERE ${whereConditions.join(' AND ')}`;
+  }
+
+  query += ` ORDER BY r.id DESC LIMIT ${Math.max(1, Number(limit) || 200)}`;
+
+  return runJsonQuery(dbPath, query);
+};
+
+export const getSymbolById = async (indexRoot, id, { readRoots = [] } = {}) => {
+  const dbPath = getDbPath(indexRoot);
+  let query = `SELECT s.id, f.path AS filePath, s.name, s.kind, s.signature, s.line, s.metadata, s.scan_id AS scanId
      FROM symbols s
      JOIN files f ON f.id = s.file_id
-     ORDER BY s.id DESC
-     LIMIT ${Math.max(1, Number(limit) || 200)}`,
-  );
+     WHERE s.id = ${Number(id)}`;
+
+  if (readRoots.length > 0) {
+    const whereClauses = readRoots.map(root => `f.path LIKE '${escapeText(root)}%'`).join(' OR ');
+    query += ` AND (${whereClauses})`;
+  }
+
+  const results = await runJsonQuery(dbPath, query);
+  return results[0] || null;
+};
+
+export const searchFileContent = async (indexRoot, { query, filePathPattern, language, readRoots = [], limit = 200 } = {}) => {
+  const dbPath = getDbPath(indexRoot);
+  let sqlQuery = `SELECT f.path, f.language FROM files f JOIN file_contents fc ON f.id = fc.file_id`;
+  const whereConditions = [];
+
+  if (query) {
+    const requiresLiteral = /[^\w\s*]/.test(query);
+    const normalizedQuery = requiresLiteral
+      ? `"${query.replace(/"/g, '""')}"`
+      : query;
+    whereConditions.push(`fc.content MATCH '${escapeText(normalizedQuery)}'`);
+  }
+  if (filePathPattern) {
+    whereConditions.push(`f.path LIKE '${escapeText(filePathPattern)}%'`);
+  }
+  if (language) {
+    whereConditions.push(`f.language = '${escapeText(language)}'`);
+  }
+  if (readRoots.length > 0) {
+    const rootClauses = readRoots.map(root => `f.path LIKE '${escapeText(root)}%'`);
+    whereConditions.push(`(${rootClauses.join(' OR ')})`);
+  }
+
+  if (whereConditions.length > 0) {
+    sqlQuery += ` WHERE ${whereConditions.join(' AND ')}`;
+  }
+
+  sqlQuery += ` LIMIT ${Math.max(1, Number(limit) || 200)}`;
+
+  return runJsonQuery(dbPath, sqlQuery);
 };
 
 export const __internals = {
@@ -300,5 +437,10 @@ export const __internals = {
   getDbPath,
   buildFileInsertStatements,
   buildSymbolInsertStatements,
+  buildRelationInsertStatements,
   ensureSqliteAvailable,
+  runMigrations,
+  getCurrentVersion,
+  getSymbolById,
+  searchFileContent,
 };

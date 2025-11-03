@@ -2,7 +2,7 @@ import path from 'path';
 import { glob } from 'glob';
 import { IGNORED_GLOB_PATTERNS, isPathIgnored } from '../utils/ignore.js';
 
-const DEFAULT_EXTENSIONS = ['.js', '.jsx', '.ts', '.tsx'];
+const DEFAULT_EXTENSIONS = ['.js', '.jsx', '.ts', '.tsx', '.py', '.go', '.java'];
 
 const EXTENSION_LANGUAGE_MAP = new Map([
   ['js', 'javascript'],

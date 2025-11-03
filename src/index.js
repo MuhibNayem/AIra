@@ -23,6 +23,21 @@ import { runDiagnostics } from './diagnostics/onboarding.js';
 import { runHealthCheck } from './diagnostics/health_check.js';
 import { telemetry } from './utils/telemetry.js';
 import { handleIndexCommand } from './indexer/index.js';
+import {
+  getIndexedFiles,
+  getIndexedSymbols,
+  getIndexedRelations,
+  getSymbolDetailsById,
+  getFileContent,
+  getSymbolsInFile,
+  getRelationsForSymbol,
+  searchCode,
+  getDefinition,
+  getDefinitionSnippet,
+} from './indexer/symbols.js';
+import { getFaissVectorStore } from './vector_store/faiss.js';
+import { createVectorStoreSearchTool } from './tools/vector_store_tool.js';
+import { createCodeAnalysisTools } from './tools/code_analysis_tools.js';
 
 const EXIT_COMMANDS = new Set(['exit', 'quit', 'q']);
 const DEFAULT_THOUGHT_TEXT = 'Analyzing request...';
@@ -1086,11 +1101,27 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
   }
 };
 
-const buildTooling = (refactorChain, systemInfo) => {
+const buildTooling = (refactorChain, systemInfo, chromaVectorStore) => {
   const catalog = [];
   const tools = [];
 
   const shellExecutor = createShellTool(systemInfo);
+  const formatToolResult = (value) => {
+    if (value === undefined || value === null) {
+      return '';
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (error) {
+        return String(value);
+      }
+    }
+    return String(value);
+  };
 
   const registerTool = (toolInstance, inputSchema) => {
     tools.push(toolInstance);
@@ -1200,7 +1231,7 @@ const buildTooling = (refactorChain, systemInfo) => {
       {
         name: 'searchFileContent',
         description:
-          'Searches for a RegExp pattern inside project files. Input must be JSON: { "pattern": "<regex>", "path"?: "<root path>", "flags"?: "gim" }.',
+          'Searches for a RegExp pattern inside project files. This tool is useful for finding specific text patterns that might not be captured by the structured code index. Input must be JSON: { "pattern": "<regex>", "path"?: "<root path>", "flags"?: "gim" }.',
         schema: z.object({
           pattern: z.string().min(1, 'pattern is required'),
           path: z.string().optional(),
@@ -1209,6 +1240,262 @@ const buildTooling = (refactorChain, systemInfo) => {
       },
     ),
     '{ pattern: string, path?: string, flags?: string }',
+  );
+
+  // Indexing Tools: These tools provide structured access to the codebase's files, symbols (functions, classes, variables, methods, interfaces), and their relationships.
+  registerTool(
+    tool(
+      async () => {
+        const result = await getIndexedFiles(process.cwd());
+        return formatToolResult(result);
+      },
+      {
+        name: 'getIndexedFiles',
+        description: 'Lists all files that have been processed and added to the code index. Returns an array of file paths along with their associated metadata (e.g., language, last indexed time). This is useful for getting an overview of the indexed codebase.',
+        schema: z.object({}).optional(),
+      },
+    ),
+    'null',
+  );
+
+  registerTool(
+    tool(
+      async (options) => {
+        const result = await getIndexedSymbols(process.cwd(), options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getIndexedSymbols',
+        description: 'Searches for code symbols (e.g., functions, classes, variables, methods, interfaces) within the indexed codebase. This tool allows for precise filtering by symbol name, its kind (e.g., \'function\', \'class\'), or the file path where it is defined. Returns an array of detailed symbol objects, each containing its ID, name, kind, signature, location, and associated file path.',
+        schema: z.object({
+          name: z.string().optional().describe('Optional: Filter by the exact or partial name of the symbol (e.g., \'myFunction\', \'UserClass\').'),
+          kind: z.string().optional().describe('Optional: Filter by the type of symbol (e.g., \'function\', \'class\', \'variable\', \'method\', \'interface\').'),
+          filePath: z.string().optional().describe('Optional: Filter by the absolute file path where the symbol is defined.'),
+          limit: z.number().int().positive().optional().describe('Optional: Maximum number of symbol results to return. Defaults to 200.'),
+        }),
+      },
+    ),
+    '{ name?: string, kind?: string, filePath?: string, limit?: number }',
+  );
+
+  registerTool(
+    tool(
+      async (options) => {
+        const result = await getIndexedRelations(process.cwd(), options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getIndexedRelations',
+        description: 'Lists all known relationships between code symbols in the indexed codebase. These relations can represent various connections like function calls, class inheritance, or variable references. The tool can filter relations by their kind (e.g., \'calls\', \'inherits\', \'references\'), or by the IDs of the source or target symbols involved in the relation. Returns an array of relation objects, each detailing the connection between two symbols.',
+        schema: z.object({
+          kind: z.string().optional().describe('Optional: Filter by the type of relation (e.g., \'calls\', \'inherits\', \'references\').'),
+          sourceSymbolId: z.number().int().positive().optional().describe('Optional: Filter by the ID of the source symbol in the relation.'),
+          targetSymbolId: z.number().int().positive().optional().describe('Optional: Filter by the ID of the target symbol in the relation.'),
+          limit: z.number().int().positive().optional().describe('Optional: Maximum number of relation results to return. Defaults to 200.'),
+        }),
+      },
+    ),
+    '{ kind?: string, sourceSymbolId?: number, targetSymbolId?: number, limit?: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ symbolId }) => {
+        const result = await getSymbolDetailsById(process.cwd(), symbolId);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getSymbolDetailsById',
+        description: 'Retrieves comprehensive detailed information about a specific code symbol using its unique ID. This includes its name, kind, signature, exact line location (start and end), the file path it belongs to, and any additional metadata captured during indexing.',
+        schema: z.object({
+          symbolId: z.number().int().positive().describe('The unique ID of the symbol to retrieve details for.'),
+        }),
+      },
+    ),
+    '{ symbolId: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ filePath }) => getFileContent(process.cwd(), filePath),
+      {
+        name: 'getFileContent',
+        description: 'Reads and returns the complete raw text content of a specified file. This is useful for examining the full source code, comments, or any other text within a file.',
+        schema: z.object({
+          filePath: z.string().min(1, 'filePath is required').describe('The absolute path to the file whose content is to be read.'),
+        }),
+      },
+    ),
+    '{ filePath: string }',
+  );
+
+  registerTool(
+    tool(
+      async ({ filePath, ...options }) => {
+        const result = await getSymbolsInFile(process.cwd(), filePath, options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getSymbolsInFile',
+        description: 'Lists all code symbols (functions, classes, variables, etc.) that are defined specifically within a given file. This allows for focused analysis of a file\'s internal structure. Results can be filtered by symbol name or kind. Returns an array of symbol objects.',
+        schema: z.object({
+          filePath: z.string().min(1, 'filePath is required').describe('The absolute path to the file to inspect.'),
+          name: z.string().optional().describe('Optional: Filter by the name of the symbol.'),
+          kind: z.string().optional().describe('Optional: Filter by the kind of symbol.'),
+          limit: z.number().int().positive().optional().describe('Optional: Maximum number of symbols to return. Defaults to 200.'),
+        }),
+      },
+    ),
+    '{ filePath: string, name?: string, kind?: string, limit?: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ symbolId, ...options }) => {
+        const result = await getRelationsForSymbol(process.cwd(), symbolId, options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getRelationsForSymbol',
+        description: 'Retrieves all direct relationships (e.g., calls, inheritance, references) that a specific symbol is involved in. This helps in understanding the immediate context and connections of a symbol. Results can be filtered by the relation kind and direction (whether the symbol is the source or target of the relation). Returns an array of relation objects.',
+        schema: z.object({
+          symbolId: z.number().int().positive().describe('The ID of the symbol to find relations for.'),
+          kind: z.string().optional().describe('Optional: Filter by the type of relation (e.g., \'calls\', \'inherits\', \'references\').'),
+          direction: z.enum(['source', 'target', 'both']).optional().describe('Optional: Specifies whether to find relations where the symbol is the \'source\', the \'target\', or \'both\'. Defaults to both.'),
+          limit: z.number().int().positive().optional().describe('Optional: Maximum number of relations to return. Defaults to 200.'),
+        }),
+      },
+    ),
+    '{ symbolId: number, kind?: string, direction?: \'source\' | \'target\' | \'both\', limit?: number }',
+  );
+
+  registerTool(
+    tool(
+      async (options) => {
+        const result = await searchCode(process.cwd(), options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'searchCode',
+        description: 'Performs a powerful full-text search across the *content* of all indexed files. This is ideal for finding specific code patterns, text snippets, or comments that might not be captured as structured symbols. Results can be filtered by a text query, file path patterns, or programming language. Returns an array of file paths where matches were found.',
+        schema: z.object({
+          query: z.string().min(1, 'query is required').describe('The text query or phrase to search for within file contents.'),
+          filePathPattern: z.string().optional().describe('Optional: Filter files by a glob-style path pattern (e.g., \'src/**/*.js\').'),
+          language: z.string().optional().describe('Optional: Filter files by programming language (e.g., \'javascript\', \'python\').'),
+          limit: z.number().int().positive().optional().describe('Optional: Maximum number of matching file paths to return. Defaults to 200.'),
+        }),
+      },
+    ),
+    '{ query: string, filePathPattern?: string, language?: string, limit?: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ symbolId }) => getDefinition(process.cwd(), symbolId),
+      {
+        name: 'getDefinition',
+        description: 'Retrieves the complete, exact code block that defines a specific code symbol (function, class, variable, etc.) by its unique ID. This provides the full implementation details of the symbol.',
+        schema: z.object({
+          symbolId: z.number().int().positive().describe('The unique ID of the symbol whose full definition is required.'),
+        }),
+      },
+    ),
+    '{ symbolId: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ symbolId, ...options }) => {
+        const result = await getDefinitionSnippet(process.cwd(), symbolId, options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getDefinitionSnippet',
+        description: 'Retrieves a concise code snippet that includes the definition of a specific symbol, along with a few lines of surrounding context. This is useful for quickly understanding a symbol\'s purpose without reading its entire implementation. The number of context lines before and after the definition can be configured.',
+        schema: z.object({
+          symbolId: z.number().int().positive().describe('The unique ID of the symbol.'),
+          contextLines: z.number().int().min(0).optional().describe('Optional: Number of lines to include before and after the definition for context. Defaults to 3.'),
+        }),
+      },
+    ),
+    '{ symbolId: number, contextLines?: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ symbolId, ...options }) => {
+        const result = await getReferences(process.cwd(), symbolId, options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getReferences',
+        description: 'Finds and returns a list of all other code symbols that refer to or use a given symbol (identified by its ID). This is crucial for understanding a symbol\'s usage and impact across the codebase. Returns an array of symbol objects that reference the target symbol.',
+        schema: z.object({
+          symbolId: z.number().int().positive().describe('The unique ID of the symbol to find references for.'),
+          kind: z.string().optional().describe('Optional: Filter references by the kind of relation (e.g., \'calls\', \'references\').'),
+          limit: z.number().int().positive().optional().describe('Optional: Maximum number of referencing symbols to return. Defaults to 200.'),
+        }),
+      },
+    ),
+    '{ symbolId: number, kind?: string, limit?: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ symbolId, ...options }) => {
+        const result = await getSymbolCallers(process.cwd(), symbolId, options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getSymbolCallers',
+        description: 'Lists all code symbols (e.g., functions, methods) that directly invoke or call a given target symbol (identified by its ID). This helps in understanding the immediate upstream dependencies of a symbol. Returns an array of caller symbol objects.',
+        schema: z.object({
+          symbolId: z.number().int().positive().describe('The unique ID of the symbol to find callers for.'),
+          kind: z.string().optional().describe('Optional: Filter callers by the kind of relation (e.g., only direct \'calls\').'),
+          limit: z.number().int().positive().optional().describe('Optional: Maximum number of caller symbols to return. Defaults to 200.'),
+        }),
+      },
+    ),
+    '{ symbolId: number, kind?: string, limit?: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ symbolId, ...options }) => {
+        const result = await getSymbolCallees(process.cwd(), symbolId, options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getSymbolCallees',
+        description: 'Lists all code symbols (e.g., functions, methods) that are directly invoked or called by a given source symbol (identified by its ID). This helps in understanding the immediate downstream dependencies of a symbol. Returns an array of callee symbol objects.',
+        schema: z.object({
+          symbolId: z.number().int().positive().describe('The unique ID of the symbol to find callees for.'),
+          kind: z.string().optional().describe('Optional: Filter callees by the kind of relation (e.g., only direct \'calls\').'),
+          limit: z.number().int().positive().optional().describe('Optional: Maximum number of callee symbols to return. Defaults to 200.'),
+        }),
+      },
+    ),
+    '{ symbolId: number, kind?: string, limit?: number }',
+  );
+
+  registerTool(
+    tool(
+      async ({ symbolId, ...options }) => {
+        const result = await getCallGraph(process.cwd(), symbolId, options);
+        return formatToolResult(result);
+      },
+      {
+        name: 'getCallGraph',
+        description: 'Generates a hierarchical call graph for a given code symbol (function or method), showing its callers and callees up to a specified depth. This provides a visualizable representation of the code\'s execution flow and dependencies. Returns a graph object containing nodes (representing symbols) and edges (representing relations).',
+        schema: z.object({
+          symbolId: z.number().int().positive().describe('The unique ID of the symbol to generate the call graph for.'),
+          depth: z.number().int().min(0).optional().describe('Optional: Maximum depth of the graph traversal. A depth of 0 means only the symbol itself. Defaults to 3.'),
+          direction: z.enum(['source', 'target', 'both']).optional().describe('Optional: Direction of the call graph traversal (\'source\' for callers, \'target\' for callees, or \'both\'). Defaults to both.'),
+          kind: z.string().optional().describe('Optional: Filter relations by kind when building the graph (e.g., only \'calls\'). Defaults to \'calls\'.'),
+        }),
+      },
+    ),
+    '{ symbolId: number, depth?: number, direction?: \'source\' | \'target\' | \'both\', kind?: string }',
   );
 
   registerTool(
@@ -1335,14 +1622,38 @@ const buildTooling = (refactorChain, systemInfo) => {
   registerTool(createWebScraperTool(), 'url: string');
   registerTool(createWebSearchTool(), 'query: string');
 
+  registerTool(createVectorStoreSearchTool(chromaVectorStore), '{ query: string, k?: number }');
+
+  const codeAnalysisTools = createCodeAnalysisTools(process.cwd());
+  codeAnalysisTools.forEach(tool => registerTool(tool));
+
   registerTool(createDirectoryTool, '{ path: string, recursive?: boolean }');
   registerTool(moveDirectoryTool, '{ source: string, destination: string }');
   registerTool(removeDirectoryTool, '{ path: string, recursive?: boolean }');
 
+  registerTool(
+    tool(
+      async ({ command, options = {} }) => {
+        const result = await handleIndexCommand({ command, options });
+        return JSON.stringify(result, null, 2);
+      },
+      {
+        name: 'runIndexCommand',
+        description:
+          'Executes a command on the local code index. Available commands are: \'build\' (to create/update the index), \'status\' (to check index health), \'prune\' (to clear the index), and \'config\' (to view index configuration). Input must be JSON: { "command": "<index_command>", "options"?: { [key: string]: any } }.',
+        schema: z.object({
+          command: z.enum(['build', 'status', 'prune', 'config']).describe('The index command to execute.'),
+          options: z.record(z.any()).optional().describe('Optional: Key-value pairs for command-specific options (e.g., { \'extensions\': \'js,ts\' } for build).'),
+        }),
+      },
+    ),
+    '{ command: \'build\' | \'status\' | \'prune\' | \'config\', options?: { [key: string]: any } }',
+  );
+
   return { tools, catalog };
 };
 
-const INDEX_SUBCOMMANDS = new Set(['build', 'status', 'prune', 'watch', 'config']);
+const INDEX_SUBCOMMANDS = new Set(['build', 'status', 'prune', 'watch', 'config', 'index-vectors']);
 
 const parseIndexArgs = (args) => {
   const [maybeCommand, ...rest] = args;
@@ -1528,8 +1839,9 @@ const main = async () => {
   const systemPrompt = `${GEMINI_CLI_AGENT_PROMPT.trim()}\n\nEnvironment Context:\n${formatSystemPrompt(
     systemInfo,
   )}`;
+  const chromaVectorStore = await getFaissVectorStore();
   const refactorChain = createRefactorChain(ollama);
-  const { tools, catalog } = buildTooling(refactorChain, systemInfo);
+  const { tools, catalog } = buildTooling(refactorChain, systemInfo, chromaVectorStore);
   logger.debug('Tooling initialized.', { toolCount: tools.length });
   const recursionLimit = Number.isFinite(Number(process.env.AIRA_RECURSION_LIMIT))
     ? Number(process.env.AIRA_RECURSION_LIMIT)

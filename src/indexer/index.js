@@ -17,8 +17,14 @@ import {
   recordFileScan,
   upsertSymbols,
 } from './storage/sqlite.js';
-import { extractSymbols } from './parsers/index.js';
+import { extractSymbols, isLanguageSupported } from './parsers/index.js';
+
 import { serializeRelationsForSymbol } from './parsers/normalizer.js';
+import { createHash } from 'crypto';
+import { getFaissVectorStore } from '../vector_store/faiss.js';
+import { getDocumentsForFile } from '../vector_store/document_loader.js';
+import { __internals as sqliteStorageInternals } from './storage/sqlite.js';
+
 
 const indexLogger = createLogger('Indexer');
 
@@ -88,6 +94,76 @@ const renderStatus = (metadata) => {
       );
     }
   }
+};
+
+const markReadyParsers = (metadata, readySet) => {
+  if (!metadata || !metadata.parsers || !readySet?.size) {
+    return;
+  }
+  readySet.forEach((language) => {
+    if (!language) {
+      return;
+    }
+    const key = `${language}`.toLowerCase();
+    if (metadata.parsers[key]) {
+      metadata.parsers[key] = {
+        ...metadata.parsers[key],
+        status: 'ready',
+      };
+    }
+  });
+};
+
+const handleIndexVectors = async (options) => {
+  const targetCwd = resolveTargetCwd(options);
+  const indexRoot = __internals.resolveIndexRoot(targetCwd);
+  await ensureSqliteSchema(indexRoot);
+  const dbPath = sqliteStorageInternals.getDbPath(indexRoot);
+  const chromaVectorStore = await getFaissVectorStore();
+
+  logProgress('Scanning project files for vector indexing...');
+  const { files } = await scanProjectFiles({ cwd: targetCwd });
+
+  for (const filePath of files) {
+    const relativeFilePath = path.relative(targetCwd, filePath);
+    logProgress(`Processing ${relativeFilePath}`);
+
+    let fileContent;
+    try {
+      fileContent = await fs.readFile(filePath, 'utf-8');
+    } catch (error) {
+      indexLogger.error(`Failed to read file ${filePath}: ${error.message}`);
+      continue;
+    }
+
+    const fileHash = createHash('sha256').update(fileContent).digest('hex');
+
+    const existingHashRows = await sqliteStorageInternals.runJsonQuery(dbPath, `SELECT hash FROM file_hashes WHERE file_path = '${filePath}'`);
+    const existingHashRow = existingHashRows[0];
+
+    if (existingHashRow && existingHashRow.hash === fileHash) {
+      logProgress(`  Skipping ${relativeFilePath} (no changes detected)`);
+      continue;
+    }
+
+    logProgress(`  Indexing ${relativeFilePath}...`);
+    const documents = await getDocumentsForFile(filePath);
+
+    if (documents.length > 0) {
+      try {
+        await chromaVectorStore.addDocuments(documents);
+        await sqliteStorageInternals.runSqlScript(dbPath, [`REPLACE INTO file_hashes (file_path, hash) VALUES ('${filePath}', '${fileHash}')`]);
+        logProgress(`  Successfully indexed ${documents.length} chunks from ${relativeFilePath}`);
+      } catch (error) {
+        indexLogger.error(`Failed to add documents from ${filePath} to Chroma: ${error.message}`);
+      }
+    } else {
+      logProgress(`  No indexable documents found in ${relativeFilePath}`);
+    }
+  }
+
+  logProgress('Vector indexing complete.');
+  return { status: 'ok', exitCode: 0 };
 };
 
 const handleStatus = async (options = {}) => {
@@ -197,8 +273,11 @@ const handleBuild = async (options) => {
   const symbolRelations = [];
   const symbolErrors = [];
   const symbolDiagnostics = [];
+  const readyParsers = new Set();
 
   for (const entry of fileEntries) {
+    const languageKey = entry.language ? entry.language.toLowerCase() : '';
+    const parserSupported = isLanguageSupported(entry.language);
     try {
       logProgress(
         `Extracting symbols from ${path.relative(targetCwd, entry.path) || entry.path}`,
@@ -207,6 +286,9 @@ const handleBuild = async (options) => {
         filePath: entry.path,
         language: entry.language,
       });
+      if (parserSupported && languageKey) {
+        readyParsers.add(languageKey);
+      }
       const extractedSymbols = symbolPayload?.symbols ?? [];
       const extractedRelations = symbolPayload?.relations ?? [];
       const diagnostics = symbolPayload?.diagnostics ?? [];
@@ -334,6 +416,7 @@ const handleBuild = async (options) => {
     }
     initializedMetadata.lastScan.symbolCount = symbolResults.length;
     initializedMetadata.lastScan.relationCount = symbolRelations.length;
+    markReadyParsers(initializedMetadata, readyParsers);
     await writeMetadata(initializedMetadata, targetCwd);
     const storedMetadata = (await readMetadata(targetCwd)) ?? initializedMetadata;
     console.log(chalk.green('Index metadata initialized.'));
@@ -424,6 +507,7 @@ const handleBuild = async (options) => {
   merged.createdAt = metadata.createdAt ?? merged.createdAt;
   merged.updatedAt = now;
 
+  markReadyParsers(merged, readyParsers);
   await writeMetadata(merged, targetCwd);
   const stored = await readMetadata(targetCwd);
   console.log(chalk.green('Index metadata refreshed.'));
@@ -504,6 +588,8 @@ export const handleIndexCommand = async (params = {}) => {
       switch (command) {
         case 'build':
           return handleBuild(options);
+        case 'index-vectors':
+          return handleIndexVectors(options);
         case 'status':
           return handleStatus(options);
         case 'config':
