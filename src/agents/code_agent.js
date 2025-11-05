@@ -101,7 +101,10 @@ export const buildCodeAgent = async ({
     tools,
     recursionLimit,
     checkpointer,
+    checkpointNamespace: CHECKPOINT_NAMESPACE,
+    checkpointSaver: defaultCheckpointer,
   });
+
 
   const tokenUsage = {
     input: 0,
