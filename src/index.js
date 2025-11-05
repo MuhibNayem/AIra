@@ -6,14 +6,14 @@ import cliCursor from 'cli-cursor';
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { ollama } from './llms/ollama.js';
-import { readFile, writeFile, listDirectory, resolveFilePath } from './tools/file_system.js';
+import { readFile, writeFile, listDirectory, resolveFilePath, readManyFiles } from './tools/file_system.js';
 import { createShellTool } from './tools/shell_tool.js';
 import { searchFileContent } from './tools/code_tools.js';
 import { createRefactorChain } from './chains/refactor_chain.js';
 import { buildCodeAgent } from './agents/code_agent.js';
 import { logger } from './utils/logger.js';
 import { detectSystemInfo, formatSystemPrompt, getMemoryUsage } from './utils/system.js';
-import { GEMINI_CLI_AGENT_PROMPT } from './prompts/agent_prompts.js';
+import { CLI_AGENT_PROMPT } from './prompts/agent_prompts.js';
 import { resolveProjectPath } from './tools/path_tools.js';
 import { extractUpdatedCode } from './utils/refactor.js';
 import { createWebScraperTool } from './tools/web_scraper.js';
@@ -31,10 +31,10 @@ const TOOL_ACTION_PREVIEW_LIMIT = 30;
 let cursorHookRegistered = false;
 
 const STRIP_ANSI_PATTERN = new RegExp(
-  
+
   '[\\u001B\\u009B][[\\]()#;?]*(?:' +
-    '(?:(?:[0-9]{1,4})(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]' +
-    '|(?:[\\dA-PR-TZcf-nq-uy=><~]))',
+  '(?:(?:[0-9]{1,4})(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]' +
+  '|(?:[\\dA-PR-TZcf-nq-uy=><~]))',
   'g',
 );
 
@@ -120,12 +120,12 @@ const toSingleLine = (value, limit = TOOL_RESULT_PREVIEW_LIMIT) => {
     typeof value === 'string'
       ? value
       : (() => {
-          try {
-            return JSON.stringify(value);
-          } catch (_) {
-            return String(value);
-          }
-        })();
+        try {
+          return JSON.stringify(value);
+        } catch (_) {
+          return String(value);
+        }
+      })();
   const normalized = raw.replace(/\s+/g, ' ').trim();
   if (normalized.length <= limit) {
     return normalized;
@@ -775,7 +775,7 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
         try {
           entry.args = JSON.parse(entry.argText);
         } catch (_) {
-          
+
         }
       }
     }
@@ -1332,6 +1332,90 @@ const buildTooling = (refactorChain, systemInfo) => {
     ),
     'null',
   );
+
+  registerTool(
+    tool(
+      async ({ rootPath, extensions, maxFiles, maxDepth, includeContent }) => {
+        const result = await readManyFiles(rootPath, {
+          extensions: extensions || [],
+          maxFiles: maxFiles || 100,
+          maxDepth: maxDepth || 10,
+          includeContent: includeContent !== false,
+        });
+
+        if (!result.success) {
+          return JSON.stringify({
+            error: true,
+            rootPath: result.rootPath,
+            errors: result.errors,
+          }, null, 2);
+        }
+
+        if (!includeContent) {
+          return JSON.stringify({
+            success: true,
+            rootPath: result.rootPath,
+            filesRead: result.filesRead,
+            filesSkipped: result.filesSkipped,
+            errors: result.errors,
+            files: result.files.map(f => ({
+              relativePath: f.relativePath,
+              size: f.size,
+              modified: f.modified,
+            })),
+          }, null, 2);
+        }
+
+        let output = `Root: ${result.rootPath}\n`;
+        output += `Files read: ${result.filesRead}, Skipped: ${result.filesSkipped}\n`;
+
+        if (result.errors.length > 0) {
+          output += `\nErrors:\n${result.errors.map(e => `  - ${e}`).join('\n')}\n`;
+        }
+
+        output += `\n${'='.repeat(80)}\n`;
+        output += `FILE CONTENTS\n`;
+        output += `${'='.repeat(80)}\n\n`;
+
+        result.files.forEach((file, index) => {
+          output += `File ${index + 1}/${result.files.length}: ${file.relativePath}\n`;
+          output += `Size: ${file.size} bytes | Modified: ${file.modified}\n`;
+          output += `${'-'.repeat(80)}\n`;
+          output += file.content;
+          output += `\n${'='.repeat(80)}\n\n`;
+        });
+
+        return output;
+      },
+      {
+        name: 'readManyFiles',
+        description: `Recursively reads multiple files from a directory tree. Useful for analyzing project structure, 
+        reading multiple source files, or gathering codebase information. Automatically respects .gitignore and security policies.
+
+        **Use this tool when you need to:**
+        - Read all files in a directory and its subdirectories
+        - Analyze multiple source files at once
+        - Get an overview of project structure with file contents
+        - Search for patterns across multiple files
+        - Understand codebase organization
+
+        **Examples:**
+        - Read all JavaScript files: rootPath="./src", extensions=[".js", ".jsx"]
+        - Read all config files: rootPath=".", extensions=[".json", ".yaml", ".yml"]
+        - Get file list only: rootPath="./src", includeContent=false
+        - Limit search depth: rootPath=".", maxDepth=2`,
+        schema: z.object({
+          rootPath: z.string().min(1, 'rootPath is required').describe('The root directory to start reading from (e.g., ".", "./src", "/absolute/path").'),
+          extensions: z.array(z.string()).optional().describe('Optional: Array of file extensions to include (e.g., [".js", ".ts", ".json"]). If omitted, reads all files.'),
+          maxFiles: z.number().int().positive().optional().default(150).describe('Optional: Maximum number of files to read. Defaults to 100 to prevent excessive memory usage.'),
+          maxDepth: z.number().int().positive().optional().default(100).describe('Optional: Maximum directory depth to traverse. Defaults to 10 levels deep.'),
+          includeContent: z.boolean().optional().default(true).describe('Optional: Whether to include file content (true) or just metadata like paths and sizes (false). Defaults to true.'),
+        }),
+      },
+    ),
+    '{ rootPath: string, extensions?: string[], maxFiles?: number, maxDepth?: number, includeContent?: boolean }',
+  );
+
   registerTool(createWebScraperTool(), 'url: string');
   registerTool(createWebSearchTool(), 'query: string');
 
@@ -1525,7 +1609,7 @@ const main = async () => {
   }
 
   const systemInfo = detectSystemInfo();
-  const systemPrompt = `${GEMINI_CLI_AGENT_PROMPT.trim()}\n\nEnvironment Context:\n${formatSystemPrompt(
+  const systemPrompt = `${CLI_AGENT_PROMPT.trim()}\n\nEnvironment Context:\n${formatSystemPrompt(
     systemInfo,
   )}`;
   const refactorChain = createRefactorChain(ollama);
@@ -1605,7 +1689,7 @@ const main = async () => {
     });
   };
 
-  
+
   console.log('AIra is ready. Type your request, or "exit" to quit.');
   if (cliOptions.mode === 'single' && cliOptions.initialInput) {
     try {
@@ -1614,14 +1698,14 @@ const main = async () => {
         input: cliOptions.initialInput,
         sessionId: cliOptions.sessionId,
       });
-      ask(); 
+      ask();
     } catch (error) {
       logger.error('Single-shot execution failed.', { error: error.message });
       rl.close();
       process.exitCode = 1;
     }
   } else {
-    ask(); 
+    ask();
   }
 
   return new Promise(() => { });

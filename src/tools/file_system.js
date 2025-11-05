@@ -84,7 +84,7 @@ export const attemptResolveExistingPath = async (originalPath, { type = 'file' }
         viable.push(match);
       }
     } catch (_) {
-      
+
     }
   }
 
@@ -129,6 +129,149 @@ export const readFile = async (filePath) => {
       }
     }
     return `Error reading file: ${error.message}`;
+  }
+};
+
+/**
+ * Reads multiple files recursively from a root directory.
+ * Respects ignore patterns and security restrictions.
+ * @param {string} rootPath The root directory to start reading from.
+ * @param {Object} options Configuration options.
+ * @param {string[]} options.extensions File extensions to include (e.g., ['.js', '.ts']). If empty, includes all files.
+ * @param {number} options.maxFiles Maximum number of files to read (default: 100).
+ * @param {number} options.maxDepth Maximum directory depth to traverse (default: 10).
+ * @param {boolean} options.includeContent Whether to include file content or just paths (default: true).
+ * @returns {Promise<Object>} Object with success status, files array, and metadata.
+ */
+export const readManyFiles = async (rootPath, options = {}) => {
+  const {
+    extensions = [],
+    maxFiles = 100,
+    maxDepth = 10,
+    includeContent = true,
+  } = options;
+
+  const results = {
+    success: true,
+    rootPath: '',
+    filesRead: 0,
+    filesSkipped: 0,
+    errors: [],
+    files: [],
+  };
+
+  try {
+    const systemInfo = detectSystemInfo();
+    const resolvedRoot = resolvePathForOS(rootPath || '.', systemInfo);
+
+    // Check if root exists and is accessible
+    if (!await directoryExists(resolvedRoot)) {
+      const fallback = await attemptResolveExistingPath(rootPath || '.', { type: 'directory' });
+      if (fallback) {
+        results.rootPath = fallback;
+      } else {
+        results.success = false;
+        results.errors.push(`Root directory not found: ${rootPath}`);
+        return results;
+      }
+    } else {
+      results.rootPath = resolvedRoot;
+    }
+
+    ensureReadAllowed(results.rootPath);
+
+    if (isPathIgnored(results.rootPath)) {
+      results.success = false;
+      results.errors.push('Root directory is in an ignored path');
+      return results;
+    }
+
+    // Build glob pattern for extensions
+    let pattern = '**/*';
+    if (extensions.length > 0) {
+      const extPattern = extensions.length === 1
+        ? extensions[0].replace(/^\./, '')
+        : `{${extensions.map(ext => ext.replace(/^\./, '')).join(',')}}`;
+      pattern = `**/*.${extPattern}`;
+    }
+
+    // Find all matching files
+    const matches = await glob(pattern, {
+      cwd: results.rootPath,
+      absolute: true,
+      nocase: systemInfo.isWindows,
+      dot: false, // Don't include hidden files by default
+      ignore: IGNORED_GLOB_PATTERNS,
+      maxDepth,
+    });
+
+    // Process each file
+    for (const filePath of matches) {
+      // Stop if we've reached the limit
+      if (results.filesRead >= maxFiles) {
+        results.errors.push(`Reached maximum file limit (${maxFiles}). Some files were not read.`);
+        break;
+      }
+
+      try {
+        // Check if path is ignored
+        if (isPathIgnored(filePath)) {
+          results.filesSkipped++;
+          continue;
+        }
+
+        // Verify it's a file
+        const stats = await fs.stat(filePath);
+        if (!stats.isFile()) {
+          results.filesSkipped++;
+          continue;
+        }
+
+        // Check security
+        try {
+          ensureReadAllowed(filePath);
+        } catch (securityError) {
+          results.filesSkipped++;
+          results.errors.push(`Security: ${filePath} - ${securityError.message}`);
+          continue;
+        }
+
+        // Read file content if requested
+        let content = null;
+        if (includeContent) {
+          try {
+            content = await fs.readFile(filePath, ENCODING);
+          } catch (readError) {
+            results.errors.push(`Read error: ${filePath} - ${readError.message}`);
+            results.filesSkipped++;
+            continue;
+          }
+        }
+
+        // Calculate relative path
+        const relativePath = path.relative(results.rootPath, filePath);
+
+        // Add to results
+        results.files.push({
+          path: filePath,
+          relativePath,
+          size: stats.size,
+          modified: stats.mtime.toISOString(),
+          content: includeContent ? content : undefined,
+        });
+
+        results.filesRead++;
+      } catch (error) {
+        results.errors.push(`Processing error: ${filePath} - ${error.message}`);
+        results.filesSkipped++;
+      }
+    }
+
+    return results;
+  } catch (error) {
+    results.success = false;
+    results.errors.push(`Fatal error: ${error.message}`);
+    return results;
   }
 };
 

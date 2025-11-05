@@ -1,6 +1,6 @@
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { MemorySaver } from '@langchain/langgraph-checkpoint';
-import { GEMINI_CLI_AGENT_PROMPT } from '../prompts/agent_prompts.js';
+import { CLI_AGENT_PROMPT } from '../prompts/agent_prompts.js';
 
 const DEFAULT_SESSION_ID = 'cli-session';
 const CHECKPOINT_NAMESPACE = 'code-agent';
@@ -92,7 +92,7 @@ export const buildCodeAgent = async ({
   tools,
   sessionId = DEFAULT_SESSION_ID,
   memoryStore = new Map(),
-  systemPrompt = GEMINI_CLI_AGENT_PROMPT,
+  systemPrompt = CLI_AGENT_PROMPT,
   recursionLimit = 150,
   checkpointer = defaultCheckpointer,
 }) => {
