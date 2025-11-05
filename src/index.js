@@ -6,7 +6,7 @@ import cliCursor from 'cli-cursor';
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { ollama } from './llms/ollama.js';
-import { readFile, writeFile, listDirectory, resolveFilePath, readManyFiles } from './tools/file_system.js';
+import { readFile, writeFile, listDirectory, resolveFilePath, readManyFiles, createManyFiles, listDirectoryStructure } from './tools/file_system.js';
 import { createShellTool } from './tools/shell_tool.js';
 import { searchFileContent } from './tools/code_tools.js';
 import { createRefactorChain } from './chains/refactor_chain.js';
@@ -1415,6 +1415,98 @@ const buildTooling = (refactorChain, systemInfo) => {
     ),
     '{ rootPath: string, extensions?: string[], maxFiles?: number, maxDepth?: number, includeContent?: boolean }',
   );
+
+  registerTool(
+    tool(
+      async ({ rootPath, structure }) => {
+        const result = await createManyFiles(rootPath, structure);
+
+        if (!result.success) {
+          return JSON.stringify({
+            error: true,
+            rootPath: result.rootPath,
+            errors: result.errors,
+          }, null, 2);
+        }
+
+        return JSON.stringify({
+          success: true,
+          rootPath: result.rootPath,
+          createdFiles: result.createdFiles,
+          createdDirs: result.createdDirs,
+          errors: result.errors,
+          logs: result.logs,
+        }, null, 2);
+      },
+      {
+        name: 'createManyFiles',
+        description: `Creates multiple files and directories from a given structure. Automatically ensures directories exist and writes content to files. OS independent.
+
+      **Use this tool when you need to:**
+      - Quickly set up a file structure (e.g., for projects, environments, etc.)
+      - Automate the creation of files in a given directory
+      - Create an entire folder structure with content at once
+
+      **Examples:**
+      - Create a project structure with directories and files:
+        rootPath: './project', structure: [{ path: 'src/index.js', content: 'console.log("Hello")' }, { path: 'README.md', content: '# Project' }]
+      - Generate a directory structure without files:
+        rootPath: './project', structure: [{ path: 'src', isDirectory: true }]
+      `,
+        schema: z.object({
+          rootPath: z.string().min(1, 'rootPath is required').describe('The root directory where the files should be created.'),
+          structure: z.array(
+            z.object({
+              path: z.string().min(1, 'path is required').describe('The file or directory path relative to the root directory.'),
+              content: z.string().optional().describe('Content to be written to the file (if not a directory).'),
+              isDirectory: z.boolean().optional().default(false).describe('Indicates whether the entry is a directory (defaults to false).'),
+            })
+          ).min(1, 'structure is required').describe('An array of file and directory definitions to create in the given root path.'),
+        }),
+      }
+    ),
+    '{ rootPath: string, structure: { path: string, content?: string, isDirectory?: boolean }[] }'
+  );
+
+  registerTool(
+  tool(
+    async ({ rootPath }) => {
+      const result = await listDirectoryStructure(rootPath);
+
+      if (!result.success) {
+        return JSON.stringify({
+          error: true,
+          rootPath: result.rootPath,
+          errors: result.errors,
+        }, null, 2);
+      }
+
+      return JSON.stringify({
+        success: true,
+        rootPath: result.rootPath,
+        structure: result.structure,
+      }, null, 2);
+    },
+    {
+      name: 'listDirectoryStructure',
+      description: `Recursively lists the directory structure of a project. Useful for visualizing the folder hierarchy, checking directory contents, or documenting the project structure.
+
+      **Use this tool when you need to:**
+      - Display the folder structure of a project.
+      - Inspect the organization of directories and files.
+      - Export a project’s directory layout.
+
+      **Examples:**
+      - Get a full folder structure: rootPath="./project"
+      - Get a folder structure of a specific directory: rootPath="./src"`,
+      schema: z.object({
+        rootPath: z.string().min(1, 'rootPath is required').describe('The root directory to start the listing from.'),
+      }),
+    }
+  ),
+  '{ rootPath: string }'
+);
+
 
   registerTool(createWebScraperTool(), 'url: string');
   registerTool(createWebSearchTool(), 'query: string');

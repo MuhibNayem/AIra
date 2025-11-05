@@ -365,3 +365,160 @@ export const listDirectory = async (directoryPath) => {
     return `Error listing directory: ${error.message}`;
   }
 };
+
+/**
+ * Creates multiple files and directories from a given structure definition.
+ * Automatically ensures directories exist and writes UTF-8 text to each file.
+ * OS independent (works across Windows, macOS, Linux).
+ *
+ * @param {string} rootPath - The root directory where files will be created.
+ * @param {Object[]} structure - Array of file or directory definitions:
+ *   Example:
+ *   [
+ *     { path: 'src/index.js', content: 'console.log("Hello")' },
+ *     { path: 'src/components/App.svelte', content: '<script></script>' },
+ *     { path: 'public', isDirectory: true }
+ *   ]
+ * @returns {Promise<Object>} Result object with success status and logs.
+ */
+export const createManyFiles = async (rootPath, structure = []) => {
+  const results = {
+    success: true,
+    rootPath: '',
+    createdFiles: 0,
+    createdDirs: 0,
+    errors: [],
+    logs: [],
+  };
+
+  try {
+    const systemInfo = detectSystemInfo();
+    const resolvedRoot = resolvePathForOS(rootPath, systemInfo);
+    results.rootPath = resolvedRoot;
+
+    ensureWriteAllowed(resolvedRoot);
+    await fs.mkdir(resolvedRoot, { recursive: true });
+
+    for (const entry of structure) {
+      try {
+        if (!entry || !entry.path) {
+          results.errors.push('Invalid entry: missing "path" field.');
+          continue;
+        }
+
+        const resolvedPath = resolvePathForOS(
+          path.join(resolvedRoot, entry.path),
+          systemInfo
+        );
+
+        // Skip ignored paths
+        if (isPathIgnored(resolvedPath)) {
+          results.logs.push(`Skipped ignored path: ${resolvedPath}`);
+          continue;
+        }
+
+        // Create directory
+        if (entry.isDirectory) {
+          await fs.mkdir(resolvedPath, { recursive: true });
+          results.logs.push(`Created directory: ${resolvedPath}`);
+          results.createdDirs++;
+          continue;
+        }
+
+        // Create file
+        ensureWriteAllowed(resolvedPath);
+        await ensureParentDirectory(resolvedPath);
+
+        const content =
+          typeof entry.content === 'string' ? entry.content : '';
+        await fs.writeFile(resolvedPath, content, ENCODING);
+
+        results.logs.push(`Created file: ${resolvedPath}`);
+        results.createdFiles++;
+      } catch (error) {
+        results.errors.push(
+          `Error creating ${entry.path}: ${error.message}`
+        );
+        results.success = false;
+      }
+    }
+
+    return results;
+  } catch (error) {
+    results.success = false;
+    results.errors.push(`Fatal error: ${error.message}`);
+    return results;
+  }
+};
+
+/**
+ * Recursively lists all directories and files in a given root path.
+ * @param {string} rootPath The root directory to start listing from.
+ * @returns {Promise<Object>} The directory structure object with success status, root path, and folder hierarchy.
+ */
+export const listDirectoryStructure = async (rootPath) => {
+  const results = {
+    success: true,
+    rootPath: '',
+    structure: [],
+    errors: [],
+  };
+
+  try {
+    const systemInfo = detectSystemInfo();
+    const resolvedRoot = resolvePathForOS(rootPath || '.', systemInfo);
+    results.rootPath = resolvedRoot;
+
+    ensureReadAllowed(resolvedRoot);
+
+    if (isPathIgnored(resolvedRoot)) {
+      results.success = false;
+      results.errors.push('Root directory is in an ignored path');
+      return results;
+    }
+
+    const entries = await fs.readdir(resolvedRoot);
+    const structure = await getDirectoryTree(resolvedRoot, entries);
+
+    results.structure = structure;
+    return results;
+  } catch (error) {
+    results.success = false;
+    results.errors.push(`Error listing directory structure: ${error.message}`);
+    return results;
+  }
+};
+
+/**
+ * Recursively builds a directory tree from a list of entries.
+ * @param {string} directory The current directory path.
+ * @param {string[]} entries The files and directories in the current directory.
+ * @returns {Promise<Object[]>} An array of directory/file objects representing the tree.
+ */
+const getDirectoryTree = async (directory, entries) => {
+  const tree = [];
+
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry);
+    try {
+      const stats = await fs.stat(fullPath);
+
+      const node = {
+        name: entry,
+        isDirectory: stats.isDirectory(),
+        children: [],
+      };
+
+      if (stats.isDirectory()) {
+        const subEntries = await fs.readdir(fullPath);
+        node.children = await getDirectoryTree(fullPath, subEntries);
+      }
+
+      tree.push(node);
+    } catch (error) {
+      tree.push({ name: entry, error: error.message });
+    }
+  }
+
+  return tree;
+};
