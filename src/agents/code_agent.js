@@ -137,7 +137,6 @@ export const buildCodeAgent = async ({
           thread_id: sessionId,
         },
       });
-      console.log('Loaded checkpoint:', checkpoint);
       return Object.keys(checkpoint.values).length != 0;
     } catch {
       return false;
@@ -199,8 +198,6 @@ export const buildCodeAgent = async ({
       content: `Relevant past tool results:\n${memoryContext}`,
     });
     messages.push({ role: 'user', content: input });
-
-    console.log('Starting stream invoke with messages:', messages);
 
     const stream = await app.stream(
       { messages },
