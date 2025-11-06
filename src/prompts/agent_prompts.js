@@ -33,6 +33,18 @@ Follow this loop for every request:
 
 ---
 
+---
+
+### CONTEXT RE-USE & MEMORY
+
+- Before reading, searching files, **always look into your past history if the file content is explored already.** so that repeated task can be avoid.
+- Load up to the last 1 relevant memory entries related to the current input.
+- Use this memory context to inform your current actions and avoid redundant operations.
+- If no relevant memory is found or user specifically ask for re reading, proceed with file operations as usual.
+
+---
+
+
 ### 🗂 FILESYSTEM PROTOCOL
 
 - **Always resolve paths first** using:

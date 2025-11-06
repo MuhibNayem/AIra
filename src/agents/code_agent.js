@@ -48,7 +48,7 @@ export const buildCodeAgent = async ({
   const { tools } = buildTooling(refactorChain, systemInfo, store);
   const llm = ollama.bindTools(tools);
 
-  const loadMemoryContext = async (input, limit = 5) => {
+  const loadMemoryContext = async (input, limit = 1) => {
     try {
       const results = await store.search(['tool_memory'], { query: input, limit });
       if (!results.length) return '';
@@ -183,9 +183,8 @@ export const buildCodeAgent = async ({
   const streamInvoke = async ({ input }, { onEvent } = {}) => {
     if (!input) throw new Error('Agent invoke requires a non-empty input.');
 
-    const memoryContext = await loadMemoryContext(input);
+    // const memoryContext = await loadMemoryContext(input);
     const hasCheckpoint = await hasExistingCheckpoint();
-    console.log('Has existing checkpoint:', hasCheckpoint);
 
     // ✅ Include system prompt only on first turn
     const messages = [];
@@ -193,10 +192,10 @@ export const buildCodeAgent = async ({
       messages.push({ role: 'system', content: systemPrompt });
     }
 
-    messages.push({
-      role: 'system',
-      content: `Relevant past tool results:\n${memoryContext}`,
-    });
+    // messages.push({
+    //   role: 'system',
+    //   content: `Relevant past tool results:\n${memoryContext}`,
+    // });
     messages.push({ role: 'user', content: input });
 
     const stream = await app.stream(
