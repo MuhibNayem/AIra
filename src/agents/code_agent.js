@@ -1,22 +1,17 @@
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { MemorySaver } from '@langchain/langgraph-checkpoint';
 import { CLI_AGENT_PROMPT } from '../prompts/agent_prompts.js';
-import { create_manage_memory_tool, create_search_memory_tool } from '@langchain/langmem';
-import { InMemoryStore } from '@langchain/langgraph-store-memory'; // or PostgresStore if you want persistence
+import { InMemoryStore } from '@langchain/langgraph';
+import { buildTooling } from '../build_tools.js';
 
 const DEFAULT_SESSION_ID = 'cli-session';
 const CHECKPOINT_NAMESPACE = 'code-agent';
 const defaultCheckpointer = new MemorySaver();
 
-/**
- * Helper: Extracts message text from LangChain message objects.
- */
 const messageContentToText = (message) => {
   if (!message) return '';
   const { content } = message;
-
   if (typeof content === 'string') return content;
-
   if (Array.isArray(content)) {
     return content
       .map((part) => {
@@ -28,49 +23,54 @@ const messageContentToText = (message) => {
       .join('')
       .trim();
   }
-
   if (content && typeof content === 'object' && 'text' in content) {
     return content.text;
   }
-
   return '';
 };
 
-/**
- * Builds a LangGraph ReAct agent tailored for the CLI workflow
- * with persistent memory (tool + user message recall).
- */
 export const buildCodeAgent = async ({
-  llm,
-  tools,
+  ollama,
   sessionId = DEFAULT_SESSION_ID,
   systemPrompt = CLI_AGENT_PROMPT,
+  systemInfo,
+  refactorChain,
   recursionLimit = 150,
   checkpointer = defaultCheckpointer,
 }) => {
-  // 🧠 Set up vector-based memory store
   const store = new InMemoryStore({
     index: {
-      dims: 1536, // match your embedding model
-      embed: 'openai:text-embedding-3-small', // or another embedding backend
+      dims: 1536,
+      embed: process.env.OLLAMA_EMBEDDING_MODEL ?? 'nomic-embed-text:latest',
     },
   });
 
-  // 🛠 Add memory tools (store + search)
-  const memoryNamespace = ['memories', sessionId];
-  const memoryTools = [
-    create_manage_memory_tool({ namespace: memoryNamespace, store }),
-    create_search_memory_tool({ namespace: memoryNamespace, store }),
-  ];
+  const { tools } = buildTooling(refactorChain, systemInfo, store);
+  const llm = ollama.bindTools(tools);
 
-  const combinedTools = [...tools, ...memoryTools];
+  const loadMemoryContext = async (input, limit = 5) => {
+    try {
+      const results = await store.search(['tool_memory'], { query: input, limit });
+      if (!results.length) return '';
+      return results
+        .map(
+          (m) =>
+            `Tool: ${m.value.tool}\nTime: ${m.value.timestamp}\nInput: ${JSON.stringify(
+              m.value.input,
+            )}\nOutput:\n${m.value.output}`,
+        )
+        .join('\n\n');
+    } catch (err) {
+      console.warn('[Memory] Failed to load past tool memories:', err);
+      return '';
+    }
+  };
 
-  // 🚀 Create ReAct agent
   const app = createReactAgent({
     llm,
-    tools: combinedTools,
+    tools,
     recursionLimit,
-    store, // essential: ensures memory persistence
+    store,
     checkpointer,
     checkpointNamespace: CHECKPOINT_NAMESPACE,
     checkpointSaver: checkpointer,
@@ -80,8 +80,7 @@ export const buildCodeAgent = async ({
 
   const accumulateUsageMetadata = (metadata) => {
     if (!metadata || typeof metadata !== 'object') return;
-    const toNumber = (v) =>
-      typeof v === 'number' && Number.isFinite(v) ? v : null;
+    const toNumber = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
     const input = toNumber(metadata.input_tokens) ?? toNumber(metadata.prompt_tokens);
     const output = toNumber(metadata.output_tokens) ?? toNumber(metadata.completion_tokens);
     if (input !== null) tokenUsage.input += input;
@@ -90,13 +89,10 @@ export const buildCodeAgent = async ({
 
   const finalizeAgentOutput = (agentOutput) => {
     accumulateUsageMetadata(agentOutput?.usage_metadata);
-    const messages = Array.isArray(agentOutput?.messages)
-      ? agentOutput.messages
-      : [];
+    const messages = Array.isArray(agentOutput?.messages) ? agentOutput.messages : [];
     const finalMessage = messages.at(-1);
     const output = messageContentToText(finalMessage);
     accumulateUsageMetadata(finalMessage?.usage_metadata);
-
     return {
       output,
       messages,
@@ -104,18 +100,73 @@ export const buildCodeAgent = async ({
     };
   };
 
-  /**
-   * Single-turn invocation
-   */
+  const normalizeStreamChunk = (chunk) => {
+    if (!Array.isArray(chunk)) {
+      return undefined;
+    }
+
+    if (chunk.length === 2 && typeof chunk[0] === 'string') {
+      return {
+        mode: chunk[0],
+        payload: chunk[1],
+      };
+    }
+
+    if (
+      chunk.length === 3 &&
+      Array.isArray(chunk[0]) &&
+      typeof chunk[1] === 'string'
+    ) {
+      return {
+        namespace: chunk[0],
+        mode: chunk[1],
+        payload: chunk[2],
+      };
+    }
+
+    return undefined;
+  };
+
+  // -------------------------------------------------------------------
+  // 🔁 HELPER: Load last checkpoint to decide whether to re-send system prompt
+  // -------------------------------------------------------------------
+  const hasExistingCheckpoint = async () => {
+    try {
+      const checkpoint = await app.getState({
+        configurable: {
+          thread_id: sessionId,
+        },
+      });
+      console.log('Loaded checkpoint:', checkpoint);
+      return Object.keys(checkpoint.values).length != 0;
+    } catch {
+      return false;
+    }
+  };
+
+  // -------------------------------------------------------------------
+  // INVOKE
+  // -------------------------------------------------------------------
   const invoke = async ({ input }) => {
     if (!input) throw new Error('Agent invoke requires a non-empty input.');
+
+    const memoryContext = await loadMemoryContext(input);
+    const hasCheckpoint = await hasExistingCheckpoint();
+
+    // ✅ Include system prompt only on first turn
+    const messages = [];
+    if (!hasCheckpoint) {
+      messages.push({ role: 'system', content: systemPrompt });
+    }
+
+    messages.push({
+      role: 'system',
+      content: `Relevant past tool results:\n${memoryContext}`,
+    });
+    messages.push({ role: 'user', content: input });
+
     const agentOutput = await app.invoke(
-      {
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: input },
-        ],
-      },
+      { messages },
       {
         recursionLimit,
         configurable: {
@@ -124,23 +175,35 @@ export const buildCodeAgent = async ({
         },
       },
     );
-
     return finalizeAgentOutput(agentOutput);
   };
 
-  /**
-   * Streaming invocation (with memory)
-   */
+  // -------------------------------------------------------------------
+  // STREAM INVOKE
+  // -------------------------------------------------------------------
   const streamInvoke = async ({ input }, { onEvent } = {}) => {
     if (!input) throw new Error('Agent invoke requires a non-empty input.');
 
+    const memoryContext = await loadMemoryContext(input);
+    const hasCheckpoint = await hasExistingCheckpoint();
+    console.log('Has existing checkpoint:', hasCheckpoint);
+
+    // ✅ Include system prompt only on first turn
+    const messages = [];
+    if (!hasCheckpoint) {
+      messages.push({ role: 'system', content: systemPrompt });
+    }
+
+    messages.push({
+      role: 'system',
+      content: `Relevant past tool results:\n${memoryContext}`,
+    });
+    messages.push({ role: 'user', content: input });
+
+    console.log('Starting stream invoke with messages:', messages);
+
     const stream = await app.stream(
-      {
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: input },
-        ],
-      },
+      { messages },
       {
         recursionLimit,
         configurable: {
@@ -151,12 +214,22 @@ export const buildCodeAgent = async ({
       },
     );
 
-    let finalPayload = null;
+    let finalPayload = null
 
     for await (const chunk of stream) {
-      if (typeof onEvent === 'function') await onEvent(chunk);
-      if (Array.isArray(chunk) && chunk[1] === 'values') {
-        finalPayload = chunk[2];
+      const normalized = normalizeStreamChunk(chunk);
+      if (!normalized) {
+        continue;
+      }
+      const { mode, payload } = normalized;
+      if (mode === 'values') {
+        finalPayload = payload;
+      }
+      if (typeof onEvent === 'function') {
+        await onEvent({
+          mode,
+          payload,
+        });
       }
     }
 
