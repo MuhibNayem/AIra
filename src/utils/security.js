@@ -84,6 +84,39 @@ const commandHead = (command) => {
   return parts[0] || '';
 };
 
+const stripWrappingQuotes = (value) => {
+  if (!value) {
+    return value;
+  }
+  const startsWithQuote = value.startsWith('"') || value.startsWith("'");
+  if (startsWithQuote && value[value.length - 1] === value[0]) {
+    return value.slice(1, -1);
+  }
+  return value;
+};
+
+const EXECUTABLE_EXTENSIONS = ['.exe', '.cmd', '.bat', '.com', '.ps1'];
+
+const canonicalizeShellHead = (rawHead) => {
+  if (!rawHead) {
+    return '';
+  }
+  let cleaned = stripWrappingQuotes(rawHead.trim());
+  const segments = cleaned.split(/[\\/]+/);
+  if (segments.length > 1) {
+    cleaned = segments.pop();
+  }
+  if (cleaned.startsWith('./')) {
+    cleaned = cleaned.slice(2);
+  } else if (cleaned.startsWith('.\\')) {
+    cleaned = cleaned.slice(2);
+  }
+  const lower = cleaned.toLowerCase();
+  const matchedExt = EXECUTABLE_EXTENSIONS.find((ext) => lower.endsWith(ext));
+  const withoutExt = matchedExt ? cleaned.slice(0, -matchedExt.length) : cleaned;
+  return normalizeCommand(withoutExt || cleaned);
+};
+
 export const isFilesystemReadOnly = () =>
   process.env.AIRA_FS_READONLY === '1' || process.env.AIRA_FS_READONLY === 'true';
 
@@ -248,7 +281,7 @@ export const ensureShellCommandAllowed = async (
   command,
   { interactive = process.stdin.isTTY && process.stdout.isTTY } = {},
 ) => {
-  const head = normalizeCommand(commandHead(command));
+  const head = canonicalizeShellHead(commandHead(command));
   if (!head) {
     return;
   }

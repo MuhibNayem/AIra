@@ -97,6 +97,18 @@ describe('security utils', () => {
     );
   });
 
+  it('blocks destructive commands invoked via absolute paths', async () => {
+    await expect(ensureShellCommandAllowed('/bin/rm -rf /tmp', { interactive: false })).rejects.toThrow(
+      /blocked by policy/,
+    );
+  });
+
+  it('blocks destructive commands invoked via relative Windows-style paths', async () => {
+    await expect(
+      ensureShellCommandAllowed('.\\RM.EXE /S', { interactive: false }),
+    ).rejects.toThrow(/blocked by policy/);
+  });
+
   it('prompts and records single-use override', async () => {
     responseQueue.push('1');
     await expect(ensureShellCommandAllowed('rm /tmp', { interactive: true })).resolves.toBe(
