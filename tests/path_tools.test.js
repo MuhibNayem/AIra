@@ -72,4 +72,40 @@ describe('path_tools.resolveProjectPath', () => {
   it('throws on empty query string', async () => {
     await expect(resolveProjectPath({ query: '   ' })).rejects.toThrow(/non-empty/);
   });
+
+  it('defaults to process.cwd() when cwd is omitted or empty', async () => {
+    const expectedCwd = process.cwd();
+    const json = await resolveProjectPath({ query: 'README.md', cwd: '' });
+    const result = JSON.parse(json);
+    expect(result.cwd).toBe(expectedCwd);
+    expect(result.matches.some((match) => match.endsWith('README.md'))).toBe(true);
+  });
+
+  it('supports glob magic queries', async () => {
+    const json = await resolveProjectPath({ query: '**/*.md', cwd: tempDir });
+    const result = JSON.parse(json);
+    expect(result.matches.some((match) => match.endsWith('README.md'))).toBe(true);
+  });
+
+  it('avoids injecting globstars when explicit paths are supplied', async () => {
+    const json = await resolveProjectPath({ query: 'src/index.js', cwd: tempDir });
+    const result = JSON.parse(json);
+    expect(result.matches.some((match) => match.endsWith('src/index.js'))).toBe(true);
+  });
+
+  it('filters ignored entries in fallback listings and honors limits', async () => {
+    await fs.mkdir(path.join(tempDir, 'node_modules'), { recursive: true });
+    const json = await resolveProjectPath({ query: 'missing,still-missing', cwd: tempDir, limit: 1 });
+    const result = JSON.parse(json);
+    expect(result.fallback.entries).toHaveLength(1);
+    expect(result.fallback.truncated).toBe(true);
+    expect(result.fallback.entries.some((entry) => entry.name === 'node_modules')).toBe(false);
+  });
+
+  it('falls back to default limit when an invalid limit is provided', async () => {
+    await fs.writeFile(path.join(tempDir, 'extra.txt'), '', 'utf-8');
+    const json = await resolveProjectPath({ query: '*.txt', cwd: tempDir, limit: 0 });
+    const result = JSON.parse(json);
+    expect(result.matches.length).toBeGreaterThan(0);
+  });
 });

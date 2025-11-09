@@ -107,6 +107,16 @@ describe('runShellCommand', () => {
     expect(output).toBe('object');
   });
 
+  it('accepts command objects via the "input" field', async () => {
+    childProcess.exec.mockImplementation((cmd, options, callback) => {
+      const cb = typeof options === 'function' ? options : callback;
+      cb(null, { stdout: 'from input', stderr: '' });
+      return { on: vi.fn() };
+    });
+    const output = await runShellCommand({ input: 'echo input' });
+    expect(output).toBe('from input');
+  });
+
   it('rejects command objects without usable fields', async () => {
     await expect(runShellCommand({})).rejects.toThrow(/expects a string command/);
   });
@@ -143,6 +153,56 @@ describe('runShellCommand', () => {
     );
     ensureSpy.mockRestore();
   });
+
+  it('normalizes multiple switches and preserves quoted paths on Windows', async () => {
+    childProcess.exec.mockImplementation((cmd, options, callback) => {
+      const cb = typeof options === 'function' ? options : callback;
+      cb(null, { stdout: 'ok', stderr: '' });
+      return { on: vi.fn() };
+    });
+    const ensureSpy = vi.spyOn(security, 'ensureShellCommandAllowed').mockResolvedValue();
+    await runShellCommand('ls -as "My Folder"', {}, { isWindows: true });
+    expect(ensureSpy).toHaveBeenCalledWith('dir /a /s "My Folder"');
+    ensureSpy.mockRestore();
+  });
+
+  it('normalizes pwd alias on Windows systems', async () => {
+    childProcess.exec.mockImplementation((cmd, options, callback) => {
+      const cb = typeof options === 'function' ? options : callback;
+      cb(null, { stdout: 'cwd', stderr: '' });
+      return { on: vi.fn() };
+    });
+    const ensureSpy = vi.spyOn(security, 'ensureShellCommandAllowed').mockResolvedValue();
+    const output = await runShellCommand('pwd', {}, { isWindows: true });
+    expect(output).toBe('cwd');
+    expect(ensureSpy).toHaveBeenCalledWith('cd');
+    ensureSpy.mockRestore();
+  });
+
+  it('normalizes clear alias on Windows systems', async () => {
+    childProcess.exec.mockImplementation((cmd, options, callback) => {
+      const cb = typeof options === 'function' ? options : callback;
+      cb(null, { stdout: 'cleared', stderr: '' });
+      return { on: vi.fn() };
+    });
+    const ensureSpy = vi.spyOn(security, 'ensureShellCommandAllowed').mockResolvedValue();
+    const output = await runShellCommand('clear', {}, { isWindows: true });
+    expect(output).toBe('cleared');
+    expect(ensureSpy).toHaveBeenCalledWith('cls');
+    ensureSpy.mockRestore();
+  });
+
+  it('merges caller provided exec options', async () => {
+    childProcess.exec.mockImplementation((cmd, options, callback) => {
+      const cb = typeof options === 'function' ? options : callback;
+      cb(null, { stdout: 'done', stderr: '' });
+      return { on: vi.fn() };
+    });
+    await runShellCommand('echo hi', { timeout: 500 });
+    const [, execOptions] = childProcess.exec.mock.calls[0];
+    expect(execOptions.timeout).toBe(500);
+    expect(execOptions.maxBuffer).toBe(1024 * 1024 * 10);
+  });
 });
 
 describe('createShellTool', () => {
@@ -175,6 +235,25 @@ describe('createShellTool', () => {
     expect(response).toBe('value');
     const [, execOptions] = childProcess.exec.mock.calls[0];
     expect(execOptions.shell).toBe('C:\\dummy\\cmd.exe');
+    if (originalComspec === undefined) {
+      delete process.env.COMSPEC;
+    } else {
+      process.env.COMSPEC = originalComspec;
+    }
+  });
+
+  it('falls back to the default Windows shell when COMSPEC is absent', async () => {
+    const originalComspec = process.env.COMSPEC;
+    delete process.env.COMSPEC;
+    childProcess.exec.mockImplementation((cmd, options, callback) => {
+      const cb = typeof options === 'function' ? options : callback;
+      cb(null, { stdout: 'value', stderr: '' });
+      return { on: vi.fn() };
+    });
+    const tool = createShellTool({ isWindows: true });
+    await tool('echo test');
+    const [, execOptions] = childProcess.exec.mock.calls[0];
+    expect(execOptions.shell).toBe('C:\\Windows\\System32\\cmd.exe');
     if (originalComspec === undefined) {
       delete process.env.COMSPEC;
     } else {
