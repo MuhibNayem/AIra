@@ -1,24 +1,18 @@
 import readline from 'readline';
-import { promises as fs } from 'fs';
 import 'dotenv/config';
 import chalk from 'chalk';
 import cliCursor from 'cli-cursor';
-import { tool } from '@langchain/core/tools';
-import { z } from 'zod';
 import { ollama } from './llms/ollama.js';
-import { readFile, writeFile, listDirectory, resolveFilePath } from './tools/file_system.js';
-import { createShellTool } from './tools/shell_tool.js';
-import { searchFileContent } from './tools/code_tools.js';
+
 import { createRefactorChain } from './chains/refactor_chain.js';
 import { buildCodeAgent } from './agents/code_agent.js';
 import { logger } from './utils/logger.js';
 import { detectSystemInfo, formatSystemPrompt, getMemoryUsage } from './utils/system.js';
-import { GEMINI_CLI_AGENT_PROMPT } from './prompts/agent_prompts.js';
-import { resolveProjectPath } from './tools/path_tools.js';
-import { extractUpdatedCode } from './utils/refactor.js';
-import { createWebScraperTool } from './tools/web_scraper.js';
-import { createWebSearchTool } from './tools/web_search.js'; 
+import { CLI_AGENT_PROMPT } from './prompts/agent_prompts.js';
+
 import { runDiagnostics } from './diagnostics/onboarding.js';
+import { runHealthCheck } from './diagnostics/health_check.js';
+import { telemetry } from './utils/telemetry.js';
 
 const EXIT_COMMANDS = new Set(['exit', 'quit', 'q']);
 const DEFAULT_THOUGHT_TEXT = 'Analyzing request...';
@@ -27,10 +21,10 @@ const TOOL_ACTION_PREVIEW_LIMIT = 30;
 let cursorHookRegistered = false;
 
 const STRIP_ANSI_PATTERN = new RegExp(
-  
+
   '[\\u001B\\u009B][[\\]()#;?]*(?:' +
-    '(?:(?:[0-9]{1,4})(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]' +
-    '|(?:[\\dA-PR-TZcf-nq-uy=><~]))',
+  '(?:(?:[0-9]{1,4})(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]' +
+  '|(?:[\\dA-PR-TZcf-nq-uy=><~]))',
   'g',
 );
 
@@ -116,12 +110,12 @@ const toSingleLine = (value, limit = TOOL_RESULT_PREVIEW_LIMIT) => {
     typeof value === 'string'
       ? value
       : (() => {
-          try {
-            return JSON.stringify(value);
-          } catch (_) {
-            return String(value);
-          }
-        })();
+        try {
+          return JSON.stringify(value);
+        } catch (_) {
+          return String(value);
+        }
+      })();
   const normalized = raw.replace(/\s+/g, ' ').trim();
   if (normalized.length <= limit) {
     return normalized;
@@ -579,7 +573,7 @@ const createThoughtRenderer = () => {
   };
 };
 
-const playAgentTimeline = async (events, renderer) => {
+const playAgentTimeline = async (events, renderer, { onToolCall, onToolResult } = {}) => {
   if (!events.length) {
     await renderer.flash('Formulating plan…');
     return;
@@ -604,6 +598,13 @@ const playAgentTimeline = async (events, renderer) => {
       renderer.persistStep(
         `${chalk.bold(`Step ${stepCount}`)} ${chalk.gray('→')} ${chalk.yellow(toolName)}${actionSegment}`,
       );
+      if (typeof onToolCall === 'function') {
+        onToolCall({
+          id: event.id,
+          toolName,
+          args: event.args,
+        });
+      }
       stepCount += 1;
     } else if (event.type === 'tool_result') {
       const entry =
@@ -617,6 +618,13 @@ const playAgentTimeline = async (events, renderer) => {
       if (event.toolName) {
         toolActions.delete(event.toolName);
       }
+      if (typeof onToolResult === 'function') {
+        onToolResult({
+          id: event.id,
+          toolName: resolvedName,
+          output: event.output,
+        });
+      }
     }
   }
 };
@@ -625,12 +633,81 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
   renderUserInput(input);
   const renderer = createThoughtRenderer();
   renderer.start(DEFAULT_THOUGHT_TEXT);
+  const turnStart = process.hrtime.bigint();
+  const initialUsage =
+    typeof agent.getTokenUsage === 'function'
+      ? { ...agent.getTokenUsage() }
+      : null;
+  const activeToolKeys = new Set();
+  const toolKeyById = new Map();
+  const toolQueueByName = new Map();
+  const trackedToolCallIds = new Set();
+
+  const registerToolStart = (identifier, toolName) => {
+    if (identifier && trackedToolCallIds.has(identifier)) {
+      return;
+    }
+    if (identifier) {
+      trackedToolCallIds.add(identifier);
+    }
+    const key = telemetry.startToolInvocation({
+      id: identifier,
+      name: toolName,
+      sessionId,
+    });
+    activeToolKeys.add(key);
+    if (identifier) {
+      toolKeyById.set(identifier, key);
+    } else if (toolName) {
+      const queue = toolQueueByName.get(toolName) ?? [];
+      queue.push(key);
+      toolQueueByName.set(toolName, queue);
+    }
+  };
+
+  const resolveToolKey = (identifier, toolName) => {
+    if (identifier && toolKeyById.has(identifier)) {
+      const key = toolKeyById.get(identifier);
+      toolKeyById.delete(identifier);
+      return key;
+    }
+    if (toolName && toolQueueByName.has(toolName)) {
+      const queue = toolQueueByName.get(toolName);
+      if (queue && queue.length) {
+        const key = queue.shift();
+        if (!queue.length) {
+          toolQueueByName.delete(toolName);
+        } else {
+          toolQueueByName.set(toolName, queue);
+        }
+        return key;
+      }
+    }
+    return null;
+  };
+
+  const finalizeTool = (identifier, toolName, { success = true, error } = {}) => {
+    const key = resolveToolKey(identifier, toolName);
+    if (!key) {
+      return;
+    }
+    if (activeToolKeys.has(key)) {
+      activeToolKeys.delete(key);
+    }
+    if (identifier) {
+      trackedToolCallIds.delete(identifier);
+    }
+    telemetry.finishToolInvocation(key, { success, error });
+  };
 
   const supportsStreaming = typeof agent.streamInvoke === 'function';
   let streamedHeaderShown = false;
   let needsNewline = false;
   let printedChunks = false;
   const streamToolActions = new Map();
+  const pendingStreamToolIds = new Set();
+  let turnCompleted = false;
+  let turnErrorMessage;
   const mergeArgumentText = (existing = '', addition = '') => {
     if (!addition) {
       return existing || '';
@@ -688,7 +765,7 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
         try {
           entry.args = JSON.parse(entry.argText);
         } catch (_) {
-          
+
         }
       }
     }
@@ -793,6 +870,11 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
             if (!keys.length) {
               return;
             }
+            const pendingKey = toolCallId || toolName;
+            if (pendingKey && !pendingStreamToolIds.has(pendingKey)) {
+              registerToolStart(toolCallId, toolName);
+              pendingStreamToolIds.add(pendingKey);
+            }
             upsertStreamAction({
               keys,
               name: toolName,
@@ -858,7 +940,9 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
         const entry = getStreamAction(toolCallId, toolName);
         const resolvedName = entry?.name || toolName;
         renderToolOutput(resolvedName, text);
+        finalizeTool(toolCallId, resolvedName, { success: true });
         deleteStreamAction(toolCallId, toolName, entry?.name);
+        pendingStreamToolIds.delete(toolCallId || resolvedName || toolName);
       }
     }
 
@@ -872,6 +956,7 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
           const toolInput = task.input?.tool_input ?? task.input;
           const actionSummary = summarizeActionArgs(toolInput);
           const toolCallId = task.tool_call_id || task.id;
+          registerToolStart(toolCallId, toolNameHint);
           upsertStreamAction({
             keys: [toolCallId, toolNameHint, task.name],
             name: toolNameHint,
@@ -888,6 +973,8 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
           const toolCallId = task.tool_call_id || task.id;
           const toolNameHint =
             typeof task.result?.tool_name === 'string' ? task.result.tool_name : task.name || 'tool';
+          finalizeTool(toolCallId, toolNameHint, { success: true });
+          pendingStreamToolIds.delete(toolCallId || toolNameHint || task.name);
           deleteStreamAction(toolCallId, toolNameHint, task.name);
         }
       }
@@ -915,7 +1002,10 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
         ? response.eventMessages
         : allMessages.slice(0, -1);
       const events = extractAgentEvents(eventMessages);
-      await playAgentTimeline(events, renderer);
+      await playAgentTimeline(events, renderer, {
+        onToolCall: ({ id, toolName }) => registerToolStart(id, toolName),
+        onToolResult: ({ id, toolName }) => finalizeTool(id, toolName, { success: true }),
+      });
     }
 
     const allMessages = Array.isArray(response?.messages) ? response.messages : [];
@@ -935,268 +1025,60 @@ const runAgentTurn = async ({ agent, input, sessionId }) => {
     }
 
     renderer.succeed('Thought process complete');
+    turnCompleted = true;
   } catch (error) {
     renderer.fail(`AIra error: ${error.message}`);
+    turnErrorMessage = error.message;
+    activeToolKeys.forEach((key) => {
+      telemetry.finishToolInvocation(key, { success: false, error: error.message });
+    });
+    activeToolKeys.clear();
+    toolKeyById.clear();
+    toolQueueByName.clear();
+    pendingStreamToolIds.clear();
     throw error;
   } finally {
     cliCursor.show();
-  }
-};
-
-const buildTooling = (refactorChain, systemInfo) => {
-  const catalog = [];
-  const tools = [];
-
-  const shellExecutor = createShellTool(systemInfo);
-
-  const registerTool = (toolInstance, inputSchema) => {
-    tools.push(toolInstance);
-    catalog.push({
-      name: toolInstance.name,
-      description: toolInstance.description,
-      input: inputSchema,
+    const finalUsage =
+      typeof agent.getTokenUsage === 'function'
+        ? { ...agent.getTokenUsage() }
+        : null;
+    const inputDelta =
+      initialUsage && finalUsage
+        ? Math.max(0, (finalUsage.input ?? 0) - (initialUsage.input ?? 0))
+        : finalUsage?.input ?? 0;
+    const outputDelta =
+      initialUsage && finalUsage
+        ? Math.max(0, (finalUsage.output ?? 0) - (initialUsage.output ?? 0))
+        : finalUsage?.output ?? 0;
+    const durationMs = Number((process.hrtime.bigint() - turnStart) / 1_000_000n);
+    if (activeToolKeys.size) {
+      activeToolKeys.forEach((key) => {
+        telemetry.finishToolInvocation(key, {
+          success: false,
+          error: turnErrorMessage || 'Tool invocation did not complete before turn end.',
+        });
+      });
+      activeToolKeys.clear();
+    }
+    toolKeyById.clear();
+    toolQueueByName.clear();
+    pendingStreamToolIds.clear();
+    const turnSuccess = Boolean(turnCompleted);
+    telemetry.recordTurn({
+      sessionId,
+      durationMs: Number.isFinite(durationMs) ? durationMs : 0,
+      success: turnSuccess,
+      inputTokens: inputDelta,
+      outputTokens: outputDelta,
+      error: turnSuccess ? undefined : turnErrorMessage || 'Turn ended with errors.',
     });
-  };
-
-  registerTool(
-    tool(
-      async ({ path }) => readFile(path),
-      {
-        name: 'readFile',
-        description: 'Reads the content of a UTF-8 text file. Input should be a filepath string.',
-        schema: z.object({
-          path: z.string().min(1, 'path is required'),
-        }),
-      },
-    ),
-    'path: string',
-  );
-
-  registerTool(
-    tool(
-      async ({ path, content }) => writeFile(path, content),
-      {
-        name: 'writeFile',
-        description:
-          'Writes UTF-8 content to a file. Input should be a JSON string: { "path": "<path>", "content": "<text>" }.',
-        schema: z.object({
-          path: z.string().min(1, 'path is required'),
-          content: z.string(),
-        }),
-      },
-    ),
-    '{ path: string, content: string }',
-  );
-
-  registerTool(
-    tool(
-      async ({ path }) => {
-        const entries = await listDirectory(path ?? '.');
-        return Array.isArray(entries) ? entries.join('\n') : entries;
-      },
-      {
-        name: 'listDirectory',
-        description:
-          'Lists files and directories at a path. Input should be a directory path string. Returns newline-delimited entries.',
-        schema: z.object({
-          path: z.string().optional(),
-        }),
-      },
-    ),
-    'path?: string',
-  );
-
-  registerTool(
-    tool(
-      async ({ query, cwd, limit }) => resolveProjectPath({ query, cwd, limit }),
-      {
-        name: 'resolvePath',
-        description:
-          'Finds absolute project paths matching a glob-style query. Useful before reading or modifying files.',
-        schema: z.object({
-          query: z.string().min(1, 'query is required'),
-          cwd: z.string().optional(),
-          limit: z.number().int().positive().optional(),
-        }),
-      },
-    ),
-    '{ query: string, cwd?: string, limit?: number }',
-  );
-
-  registerTool(
-    tool(
-      async () => JSON.stringify(detectSystemInfo(), null, 2),
-      {
-        name: 'getSystemInfo',
-        description: 'Returns JSON describing the current operating system, architecture, and shell.',
-        schema: z.object({}).optional(),
-      },
-    ),
-    'null',
-  );
-
-  registerTool(
-    tool(
-      async ({ command }) => shellExecutor(command),
-      {
-        name: 'runShellCommand',
-        description:
-          'Executes a shell command. Input should be the command string, e.g. "ls -la src". Returns stdout/stderr.',
-        schema: z.object({
-          command: z.string().min(1, 'command is required'),
-        }),
-      },
-    ),
-    'command: string',
-  );
-
-  registerTool(
-    tool(
-      async ({ pattern, path = './', flags = '' }) =>
-        searchFileContent(pattern, path, flags),
-      {
-        name: 'searchFileContent',
-        description:
-          'Searches for a RegExp pattern inside project files. Input must be JSON: { "pattern": "<regex>", "path"?: "<root path>", "flags"?: "gim" }.',
-        schema: z.object({
-          pattern: z.string().min(1, 'pattern is required'),
-          path: z.string().optional(),
-          flags: z.string().optional(),
-        }),
-      },
-    ),
-    '{ pattern: string, path?: string, flags?: string }',
-  );
-
-  registerTool(
-    tool(
-      async ({ code, instructions, context }) =>
-        refactorChain.invoke({ code, instructions, context: context ?? '' }, {
-          "recursionLimit": Number.isFinite(Number(process.env.AIRA_RECURSION_LIMIT))
-            ? Number(process.env.AIRA_RECURSION_LIMIT)
-            : 200
-        }),
-      {
-        name: 'refactorCode',
-        description:
-          'Refactors code snippets. Input must be JSON: { "code": "<existing code>", "instructions": "<refactor goal>", "context": "<optional context>" }.',
-        schema: z.object({
-          code: z.string().min(1, 'code is required'),
-          instructions: z.string().min(1, 'instructions are required'),
-          context: z.string().optional(),
-        }),
-      },
-    ),
-    '{ code: string, instructions: string, context?: string }',
-  );
-
-  registerTool(
-    tool(
-      async ({ path, startLine, endLine, instructions }) => {
-        const absolutePath = await resolveFilePath(path);
-        let originalContent;
-        try {
-          originalContent = await fs.readFile(absolutePath, 'utf-8');
-        } catch (error) {
-          throw new Error(`Failed to read ${absolutePath}: ${error.message}`);
-        }
-
-        const { lines, lineEnding, hasTrailingNewline } = buildLineStructure(originalContent);
-        if (lines.length === 0) {
-          throw new Error('refactorFileSegment cannot operate on an empty file.');
-        }
-        validateLineRange(startLine, endLine, lines.length);
-
-        const startIndex = Math.max(0, startLine - 1);
-        const endIndex = Math.min(lines.length, endLine);
-        const targetLines = lines.slice(startIndex, endIndex);
-        const snippet = targetLines.join('\n');
-        const context = sliceContext(lines, startIndex, endIndex);
-
-        const refactorInput = {
-          code: snippet,
-          instructions,
-          context: [
-            `File: ${absolutePath}`,
-            `Lines: ${startLine}-${endLine}`,
-            context.before ? `Before:\n${context.before}` : '',
-            context.after ? `After:\n${context.after}` : '',
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-        };
-
-        const refactorResponse = await refactorChain.invoke(refactorInput);
-        const { code: updatedCode } = extractUpdatedCode(refactorResponse);
-        const normalizedSegment = updatedCode.replace(/\r\n/g, '\n').split('\n');
-
-        const updatedLines = [
-          ...lines.slice(0, startIndex),
-          ...normalizedSegment,
-          ...lines.slice(endIndex),
-        ];
-
-        let finalContent = updatedLines.join(lineEnding);
-        if (hasTrailingNewline && !finalContent.endsWith(lineEnding)) {
-          finalContent += lineEnding;
-        }
-
-        try {
-          await fs.writeFile(absolutePath, finalContent, 'utf-8');
-        } catch (error) {
-          throw new Error(`Failed to write ${absolutePath}: ${error.message}`);
-        }
-
-        return JSON.stringify(
-          {
-            path: absolutePath,
-            startLine,
-            endLine,
-            message: `Refactored lines ${startLine}-${endLine}`,
-          },
-          null,
-          2,
-        );
-      },
-      {
-        name: 'refactorFileSegment',
-        description:
-          'Refactors a specific line range within a file. Input: { "path": string, "startLine": number, "endLine": number, "instructions": string }.',
-        schema: z
-          .object({
-            path: z.string().min(1, 'path is required'),
-            startLine: z.number().int().min(1),
-            endLine: z.number().int().min(1),
-            instructions: z.string().min(1, 'instructions are required'),
-          })
-          .refine((value) => value.endLine >= value.startLine, {
-            message: 'endLine must be greater than or equal to startLine',
-          }),
-      },
-    ),
-    '{ path: string, startLine: number, endLine: number, instructions: string }',
-  );
-
-  registerTool(
-    tool(
-      async () => JSON.stringify(catalog, null, 2),
-      {
-        name: 'list_tools',
-        description:
-          'Lists all available tools alongside their descriptions and expected input structure as JSON.',
-        schema: z.object({}).optional(),
-      },
-    ),
-    'null',
-  );
-  registerTool(createWebScraperTool(), 'url: string');
-  registerTool(createWebSearchTool(), 'query: string');
-
-  return { tools, catalog };
+  }
 };
 
 const parseCliArgs = () => {
   const args = process.argv.slice(2);
+
   const options = {
     mode: 'interactive',
     sessionId: process.env.AIRA_SESSION_ID || 'cli-session',
@@ -1215,6 +1097,10 @@ const parseCliArgs = () => {
     if (arg === '--check' || arg === '--doctor') {
       options.mode = 'diagnostics';
       options.diagnostics.enabled = true;
+      continue;
+    }
+    if (arg === '--health') {
+      options.mode = 'health';
       continue;
     }
     if (arg === '--fix') {
@@ -1276,6 +1162,13 @@ const parseCliArgs = () => {
 const main = async () => {
   const cliOptions = parseCliArgs();
 
+  if (cliOptions.mode === 'health') {
+    const report = await runHealthCheck();
+    console.log(JSON.stringify(report, null, 2));
+    process.exitCode = report.status === 'ok' ? 0 : 1;
+    return;
+  }
+
   if (cliOptions.mode === 'diagnostics') {
     const { diagnostics } = cliOptions;
     const result = await runDiagnostics({
@@ -1313,23 +1206,21 @@ const main = async () => {
   }
 
   const systemInfo = detectSystemInfo();
-  const systemPrompt = `${GEMINI_CLI_AGENT_PROMPT.trim()}\n\nEnvironment Context:\n${formatSystemPrompt(
+  const systemPrompt = `${CLI_AGENT_PROMPT.trim()}\n\nEnvironment Context:\n${formatSystemPrompt(
     systemInfo,
   )}`;
   const refactorChain = createRefactorChain(ollama);
-  const { tools, catalog } = buildTooling(refactorChain, systemInfo);
-  logger.debug('Tooling initialized.', { toolCount: tools.length });
   const recursionLimit = Number.isFinite(Number(process.env.AIRA_RECURSION_LIMIT))
     ? Number(process.env.AIRA_RECURSION_LIMIT)
     : 200;
-  const llmWithTools = ollama.bindTools(tools);
+  
   const agent = await buildCodeAgent({
-    llm: llmWithTools,
-    tools,
+    ollama: ollama,
     sessionId: cliOptions.sessionId,
     systemPrompt,
+    systemInfo,
+    refactorChain,
     recursionLimit: recursionLimit,
-    toolCatalog: catalog,
   });
   logger.info('AIra agent initialized.', {
     sessionId: cliOptions.sessionId,
@@ -1393,7 +1284,7 @@ const main = async () => {
     });
   };
 
-  
+
   console.log('AIra is ready. Type your request, or "exit" to quit.');
   if (cliOptions.mode === 'single' && cliOptions.initialInput) {
     try {
@@ -1402,14 +1293,14 @@ const main = async () => {
         input: cliOptions.initialInput,
         sessionId: cliOptions.sessionId,
       });
-      ask(); 
+      ask();
     } catch (error) {
       logger.error('Single-shot execution failed.', { error: error.message });
       rl.close();
       process.exitCode = 1;
     }
   } else {
-    ask(); 
+    ask();
   }
 
   return new Promise(() => { });

@@ -1,6 +1,7 @@
 import { exec } from 'child_process';
 import util from 'util';
 import { detectSystemInfo } from '../utils/system.js';
+import { ensureShellCommandAllowed } from '../utils/security.js';
 
 const execPromise = util.promisify(exec);
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 10; 
@@ -125,20 +126,19 @@ const resolveCommandInput = (raw) => {
  * @returns {Promise<string>} The stdout and stderr of the command.
  */
 export const runShellCommand = async (command, options = {}, systemInfo = detectSystemInfo()) => {
-  
   const validatedCommand = resolveCommandInput(command);
-  
-  
   if (!validatedCommand || typeof validatedCommand !== 'string') {
-    throw new Error(`Invalid command: resolveCommandInput failed to return a valid command for input: ${command}`);
+    throw new Error(
+      `Invalid command: resolveCommandInput failed to return a valid command for input: ${command}`,
+    );
   }
 
-  
   if (typeof options !== 'object') {
     throw new Error(`Options must be an object if provided. Received: ${typeof options}`);
   }
 
   const normalized = normalizeCommand(validatedCommand, systemInfo);
+  await ensureShellCommandAllowed(normalized);
 
   const defaultOptions = {
     maxBuffer: DEFAULT_MAX_BUFFER,

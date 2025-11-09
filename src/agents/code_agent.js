@@ -1,164 +1,101 @@
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { MemorySaver } from '@langchain/langgraph-checkpoint';
-import { GEMINI_CLI_AGENT_PROMPT } from '../prompts/agent_prompts.js';
+import { CLI_AGENT_PROMPT } from '../prompts/agent_prompts.js';
+import { InMemoryStore } from '@langchain/langgraph';
+import { buildTooling } from '../build_tools.js';
 
 const DEFAULT_SESSION_ID = 'cli-session';
 const CHECKPOINT_NAMESPACE = 'code-agent';
 const defaultCheckpointer = new MemorySaver();
 
 const messageContentToText = (message) => {
-  if (!message) {
-    return '';
-  }
-
+  if (!message) return '';
   const { content } = message;
-
-  if (typeof content === 'string') {
-    return content;
-  }
-
+  if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content
       .map((part) => {
-        if (typeof part === 'string') {
-          return part;
-        }
-        if (part?.text) {
-          return part.text;
-        }
-        if (part?.type === 'tool_call') {
-          return '';
-        }
+        if (typeof part === 'string') return part;
+        if (part?.text) return part.text;
+        if (part?.type === 'tool_call') return '';
         return '';
       })
       .join('')
       .trim();
   }
-
   if (content && typeof content === 'object' && 'text' in content) {
     return content.text;
   }
-
   return '';
 };
 
-const ensureHistory = (memoryStore, sessionKey) => {
-  if (!memoryStore.has(sessionKey)) {
-    memoryStore.set(sessionKey, []);
-  }
-  return memoryStore.get(sessionKey);
-};
-
-const isSystemMessage = (message) => {
-  if (!message) {
-    return false;
-  }
-  if (typeof message._getType === 'function') {
-    return message._getType() === 'system';
-  }
-  if (typeof message.getType === 'function') {
-    return message.getType() === 'system';
-  }
-  if (typeof message.role === 'string') {
-    return message.role === 'system';
-  }
-  return false;
-};
-
-const buildMessageBatch = (history, input, systemPrompt) => {
-  const messages = [];
-  const hasSystemMessage = history.some((message) => isSystemMessage(message));
-
-  if (systemPrompt && !hasSystemMessage) {
-    messages.push({ role: 'system', content: systemPrompt });
-  }
-
-  messages.push({ role: 'user', content: input });
-
-  return messages;
-};
-
-/**
- * Builds a LangGraph ReAct agent tailored for the CLI workflow.
- * @param {object} params
- * @param {import('@langchain/core/language_models/chat_models').BaseChatModel} params.llm
- * @param {import('@langchain/core/tools').StructuredToolInterface[]} params.tools
- * @param {string} [params.sessionId]
- * @param {Map<string, any[]>} [params.memoryStore]
- * @param {string} [params.systemPrompt]
- */
 export const buildCodeAgent = async ({
-  llm,
-  tools,
+  ollama,
   sessionId = DEFAULT_SESSION_ID,
-  memoryStore = new Map(),
-  systemPrompt = GEMINI_CLI_AGENT_PROMPT,
+  systemPrompt = CLI_AGENT_PROMPT,
+  systemInfo,
+  refactorChain,
   recursionLimit = 150,
   checkpointer = defaultCheckpointer,
 }) => {
+  const store = new InMemoryStore({
+    index: {
+      dims: 1536,
+      embed: process.env.OLLAMA_EMBEDDING_MODEL ?? 'nomic-embed-text:latest',
+    },
+  });
+
+  const { tools } = buildTooling(refactorChain, systemInfo, store);
+  const llm = ollama.bindTools(tools);
+
+  const loadMemoryContext = async (input, limit = 1) => {
+    try {
+      const results = await store.search(['tool_memory'], { query: input, limit });
+      if (!results.length) return '';
+      return results
+        .map(
+          (m) =>
+            `Tool: ${m.value.tool}\nTime: ${m.value.timestamp}\nInput: ${JSON.stringify(
+              m.value.input,
+            )}\nOutput:\n${m.value.output}`,
+        )
+        .join('\n\n');
+    } catch (err) {
+      console.warn('[Memory] Failed to load past tool memories:', err);
+      return '';
+    }
+  };
+
   const app = createReactAgent({
     llm,
     tools,
     recursionLimit,
+    store,
     checkpointer,
+    checkpointNamespace: CHECKPOINT_NAMESPACE,
+    checkpointSaver: checkpointer,
   });
 
-  const tokenUsage = {
-    input: 0,
-    output: 0,
-  };
+  const tokenUsage = { input: 0, output: 0 };
 
   const accumulateUsageMetadata = (metadata) => {
-    if (!metadata || typeof metadata !== 'object') {
-      return;
-    }
-    const toNumber = (value) =>
-      typeof value === 'number' && Number.isFinite(value) ? value : null;
-
-    const inputTokens =
-      toNumber(metadata.input_tokens) ?? toNumber(metadata.prompt_tokens);
-    const outputTokens =
-      toNumber(metadata.output_tokens) ?? toNumber(metadata.completion_tokens);
-
-    if (inputTokens !== null) {
-      tokenUsage.input += inputTokens;
-    }
-    if (outputTokens !== null) {
-      tokenUsage.output += outputTokens;
-    }
+    if (!metadata || typeof metadata !== 'object') return;
+    const toNumber = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const input = toNumber(metadata.input_tokens) ?? toNumber(metadata.prompt_tokens);
+    const output = toNumber(metadata.output_tokens) ?? toNumber(metadata.completion_tokens);
+    if (input !== null) tokenUsage.input += input;
+    if (output !== null) tokenUsage.output += output;
   };
 
-  const finalizeAgentOutput = (
-    agentOutput,
-    history,
-    historyLength,
-    activeSessionId,
-  ) => {
+  const finalizeAgentOutput = (agentOutput) => {
     accumulateUsageMetadata(agentOutput?.usage_metadata);
-    const messages = Array.isArray(agentOutput?.messages)
-      ? agentOutput.messages
-      : [];
-    memoryStore.set(activeSessionId, messages);
-
+    const messages = Array.isArray(agentOutput?.messages) ? agentOutput.messages : [];
     const finalMessage = messages.at(-1);
-    
     const output = messageContentToText(finalMessage);
-
     accumulateUsageMetadata(finalMessage?.usage_metadata);
-    if (Array.isArray(agentOutput?.raw?.messages)) {
-      const rawMessages = agentOutput.raw.messages;
-      const rawFinal = rawMessages[rawMessages.length - 1];
-      if (rawFinal && rawFinal !== finalMessage) {
-        accumulateUsageMetadata(rawFinal.usage_metadata);
-      }
-    }
-    const newMessages = messages.slice(historyLength);
-
     return {
       output,
       messages,
-      newMessages,
-      eventMessages: newMessages.slice(0, Math.max(0, newMessages.length - 1)),
       raw: agentOutput,
     };
   };
@@ -190,101 +127,100 @@ export const buildCodeAgent = async ({
     return undefined;
   };
 
-  const invoke = async ({ input, sessionId: activeSessionId = sessionId }) => {
-    if (!input) {
-      throw new Error('Agent invoke requires a non-empty input.');
-    }
-
-    const history = ensureHistory(memoryStore, activeSessionId);
-    const historyLength = history.length;
-    const requestMessages = buildMessageBatch(history, input, systemPrompt);
-    const agentOutput = await app.invoke(
-      { messages: requestMessages },
-      {
-        recursionLimit: Number.isFinite(Number(process.env.AIRA_RECURSION_LIMIT))
-          ? Number(process.env.AIRA_RECURSION_LIMIT)
-          : 200,
+  // -------------------------------------------------------------------
+  // 🔁 HELPER: Load last checkpoint to decide whether to re-send system prompt
+  // -------------------------------------------------------------------
+  const hasExistingCheckpoint = async () => {
+    try {
+      const checkpoint = await app.getState({
         configurable: {
-          thread_id: activeSessionId,
-          checkpoint_ns: CHECKPOINT_NAMESPACE,
+          thread_id: sessionId,
         },
-      },
-    );
-    return finalizeAgentOutput(agentOutput, history, historyLength, activeSessionId);
+      });
+      return Object.keys(checkpoint.values).length != 0;
+    } catch {
+      return false;
+    }
   };
 
-  const streamInvoke = async (
-    { input, sessionId: activeSessionId = sessionId },
-    { onEvent } = {},
-  ) => {
-    if (!input) {
-      throw new Error('Agent invoke requires a non-empty input.');
+  // -------------------------------------------------------------------
+  // INVOKE
+  // -------------------------------------------------------------------
+  const invoke = async ({ input }) => {
+    if (!input) throw new Error('Agent invoke requires a non-empty input.');
+
+    const memoryContext = await loadMemoryContext(input);
+    const hasCheckpoint = await hasExistingCheckpoint();
+
+    // ✅ Include system prompt only on first turn
+    const messages = [];
+    if (!hasCheckpoint) {
+      messages.push({ role: 'system', content: systemPrompt });
     }
 
-    const history = ensureHistory(memoryStore, activeSessionId);
-    const historyLength = history.length;
-    const requestMessages = buildMessageBatch(history, input, systemPrompt);
+    messages.push({
+      role: 'system',
+      content: `Relevant past tool results:\n${memoryContext}`,
+    });
+    messages.push({ role: 'user', content: input });
 
-    const streamModes = ['messages', 'tasks', 'values'];
-    const stream = await app.stream(
-      { messages: requestMessages },
+    const agentOutput = await app.invoke(
+      { messages },
       {
-        recursionLimit: Number.isFinite(Number(process.env.AIRA_RECURSION_LIMIT))
-          ? Number(process.env.AIRA_RECURSION_LIMIT)
-          : 200,
+        recursionLimit,
         configurable: {
-          thread_id: activeSessionId,
+          thread_id: sessionId,
           checkpoint_ns: CHECKPOINT_NAMESPACE,
         },
-        streamMode: streamModes,
+      },
+    );
+    return finalizeAgentOutput(agentOutput);
+  };
+
+  // -------------------------------------------------------------------
+  // STREAM INVOKE
+  // -------------------------------------------------------------------
+  const streamInvoke = async ({ input }, { onEvent } = {}) => {
+    if (!input) throw new Error('Agent invoke requires a non-empty input.');
+
+    // const memoryContext = await loadMemoryContext(input);
+    const hasCheckpoint = await hasExistingCheckpoint();
+
+    // ✅ Include system prompt only on first turn
+    const messages = [];
+    if (!hasCheckpoint) {
+      messages.push({ role: 'system', content: systemPrompt });
+    }
+
+    // messages.push({
+    //   role: 'system',
+    //   content: `Relevant past tool results:\n${memoryContext}`,
+    // });
+    messages.push({ role: 'user', content: input });
+
+    const stream = await app.stream(
+      { messages },
+      {
+        recursionLimit,
+        configurable: {
+          thread_id: sessionId,
+          checkpoint_ns: CHECKPOINT_NAMESPACE,
+        },
+        streamMode: ['messages', 'tasks', 'values'],
       },
     );
 
-    let finalPayload = null;
-    const collectedMessages = [];
-    const seenMessageIds = new Set();
-
-    const recordMessage = (message) => {
-      if (!message || typeof message !== 'object') {
-        return;
-      }
-      const getType =
-        typeof message._getType === 'function'
-          ? message._getType.bind(message)
-          : typeof message.getType === 'function'
-            ? message.getType.bind(message)
-            : undefined;
-      if (getType && getType() === 'ai_chunk') {
-        return;
-      }
-      const identifier =
-        typeof message.id === 'string' && message.id
-          ? message.id
-          : `message-${collectedMessages.length}`;
-      if (seenMessageIds.has(identifier)) {
-        return;
-      }
-      seenMessageIds.add(identifier);
-      collectedMessages.push(message);
-    };
+    let finalPayload = null
 
     for await (const chunk of stream) {
       const normalized = normalizeStreamChunk(chunk);
       if (!normalized) {
         continue;
       }
-
       const { mode, payload } = normalized;
-
-      if (mode === 'messages') {
-        const [message] = payload || [];
-        recordMessage(message);
-      }
-
       if (mode === 'values') {
         finalPayload = payload;
       }
-
       if (typeof onEvent === 'function') {
         await onEvent({
           mode,
@@ -293,25 +229,12 @@ export const buildCodeAgent = async ({
       }
     }
 
-    const agentOutput =
-      finalPayload && typeof finalPayload === 'object' ? finalPayload : {};
-
-    if (!Array.isArray(agentOutput.messages)) {
-      const fallbackMessages = [
-        ...history,
-        ...requestMessages,
-        ...collectedMessages,
-      ];
-      agentOutput.messages = fallbackMessages;
-    }
-
-    return finalizeAgentOutput(agentOutput, history, historyLength, activeSessionId);
+    return finalizeAgentOutput(finalPayload || {});
   };
 
   return {
     invoke,
     streamInvoke,
-    getHistory: (activeSessionId = sessionId) => ensureHistory(memoryStore, activeSessionId),
     sessionId,
     app,
     recursionLimit,
